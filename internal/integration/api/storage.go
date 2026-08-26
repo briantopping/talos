@@ -1628,3 +1628,191 @@ func (suite *StorageSuite) lvmVolumeExists(node string, expectedVolumes []string
 func init() {
 	allSuites = append(allSuites, new(StorageSuite))
 }
+
+// encryptedRawVolumeDoc builds a RawVolumeConfig like rawVolumeDoc, LUKS2
+// encrypted with a static key. RawVolumeConfig is the only document that can
+// express an encrypted block device with no filesystem: UserVolumeConfig
+// coerces `filesystem: none` to XFS in FilesystemSpec.Type(), which formats and
+// mounts the device and so leaves LVM nothing to claim.
+func encryptedRawVolumeDoc(name, diskMatch, maxSize, passphrase string) *blockcfg.RawVolumeConfigV1Alpha1 {
+	doc := rawVolumeDoc(name, diskMatch, maxSize)
+	doc.EncryptionSpec = blockcfg.EncryptionSpec{
+		EncryptionProvider: block.EncryptionProviderLUKS2,
+		EncryptionKeys: []blockcfg.EncryptionKey{
+			{
+				KeySlot:   0,
+				KeyStatic: &blockcfg.EncryptionKeyStatic{KeyData: passphrase},
+			},
+		},
+	}
+
+	return doc
+}
+
+// provisionEncryptedRawVolumes creates encrypted raw volumes on the disk matched
+// by diskMatch and returns, per volume, the ciphertext partition (Location, the
+// device a VG selector can name) and the opened device (MountLocation, the only
+// device a PV may be created on).
+func (suite *StorageSuite) provisionEncryptedRawVolumes(
+	nodeCtx context.Context, diskMatch, passphrase string, names ...string,
+) (ciphertext, opened []string) {
+	const (
+		assertTimeout  = 90 * time.Second
+		assertInterval = 2 * time.Second
+	)
+
+	docs := xslices.Map(names, func(name string) any {
+		return encryptedRawVolumeDoc(name, diskMatch, "1GiB", passphrase)
+	})
+
+	suite.PatchMachineConfig(nodeCtx, docs...)
+
+	ciphertext = make([]string, 0, len(names))
+	opened = make([]string, 0, len(names))
+
+	for _, name := range names {
+		rawVolumeID := constants.RawVolumePrefix + name
+
+		// The failure this test covers leaves the volume permanently failed
+		// rather than slow, so report the volume's own error instead of a bare
+		// timeout -- "block dev type mismatch: lvm2-pv != luks" is the symptom
+		// of a PV having been created on the ciphertext device.
+		suite.Require().Eventually(func() bool {
+			vs, err := safe.StateGetByID[*block.VolumeStatus](nodeCtx, suite.Client.COSI, rawVolumeID)
+			if err != nil {
+				return false
+			}
+
+			return vs.TypedSpec().Phase == block.VolumePhaseReady &&
+				vs.TypedSpec().Location != "" &&
+				vs.TypedSpec().MountLocation != ""
+		}, assertTimeout, assertInterval, "encrypted raw volume %q not ready: %s", rawVolumeID, suite.volumeError(nodeCtx, rawVolumeID))
+
+		vs, err := safe.StateGetByID[*block.VolumeStatus](nodeCtx, suite.Client.COSI, rawVolumeID)
+		suite.Require().NoError(err)
+
+		ciphertext = append(ciphertext, vs.TypedSpec().Location)
+		opened = append(opened, vs.TypedSpec().MountLocation)
+	}
+
+	return ciphertext, opened
+}
+
+// volumeError reports a volume's current error message, for assertion messages.
+func (suite *StorageSuite) volumeError(nodeCtx context.Context, volumeID string) string {
+	vs, err := safe.StateGetByID[*block.VolumeStatus](nodeCtx, suite.Client.COSI, volumeID)
+	if err != nil {
+		return fmt.Sprintf("no VolumeStatus: %v", err)
+	}
+
+	return fmt.Sprintf("phase %s: %s", vs.TypedSpec().Phase, vs.TypedSpec().ErrorMessage)
+}
+
+// TestLVMOnEncryptedRawVolumes provisions a VG backed by ENCRYPTED raw volume
+// partitions.
+//
+// A VG selector can only name the ciphertext partition -- `volume.partition_label`
+// is a property of the partition, and the opened dm device carries no label --
+// so the device the selector matches is not the device the PV may be created on.
+// LVM has to wait for LUKS to open and then use the opened device. Creating the
+// PV on the ciphertext writes an LVM label over the LUKS header and leaves the
+// volume permanently failed with "block dev type mismatch: lvm2-pv != luks".
+//
+//nolint:gocyclo
+func (suite *StorageSuite) TestLVMOnEncryptedRawVolumes() {
+	if testing.Short() {
+		suite.T().Skip("skipping test in short mode.")
+	}
+
+	if suite.Cluster == nil || suite.Cluster.Provisioner() != base.ProvisionerQEMU {
+		suite.T().Skip("skipping test for non-qemu provisioner")
+	}
+
+	node := suite.RandomDiscoveredNodeInternalIP(machine.TypeWorker)
+
+	k8sNode, err := suite.GetK8sNodeByInternalIP(suite.ctx, node)
+	suite.Require().NoError(err)
+
+	nodeName := k8sNode.Name
+
+	userDisks := suite.UserDisks(suite.ctx, node)
+
+	if len(userDisks) < 1 {
+		suite.T().Skipf("not enough user disks on %s/%s: %q", node, nodeName, userDisks)
+	}
+
+	defer suite.assertUserDisksReleased(suite.ctx, node, nodeName, userDisks)
+
+	nodeCtx := client.WithNode(suite.ctx, node)
+
+	disk, err := safe.StateGetByID[*block.Disk](nodeCtx, suite.Client.COSI, filepath.Base(userDisks[0]))
+	suite.Require().NoError(err)
+	suite.Require().NotEmpty(disk.TypedSpec().Symlinks)
+
+	diskMatch := fmt.Sprintf("'%s' in disk.symlinks", disk.TypedSpec().Symlinks[0])
+
+	rawNames := []string{"lvmenc0"}
+
+	const (
+		vgEnc      = "vgenc"
+		passphrase = "encryptedrawvolume"
+	)
+
+	var ciphertext []string
+
+	defer func() { suite.cleanupRawVG(nodeCtx, vgEnc, rawNames, ciphertext, userDisks[0]) }()
+
+	ciphertext, opened := suite.provisionEncryptedRawVolumes(nodeCtx, diskMatch, passphrase, rawNames...)
+
+	suite.T().Logf("encrypted raw volumes: ciphertext %v, opened %v", ciphertext, opened)
+
+	// Non-vacuity: if the opened device were the same as the ciphertext one the
+	// volume was never actually encrypted, and every assertion below would pass
+	// without covering the case this test exists for.
+	for i := range ciphertext {
+		suite.Require().NotEqual(ciphertext[i], opened[i], "volume %q is not encrypted", rawNames[i])
+	}
+
+	suite.PatchMachineConfig(nodeCtx, vgDocSelector(vgEnc, `volume.partition_label.startsWith("r-lvmenc")`))
+
+	// The PV must exist on the OPENED device, and NOT on the ciphertext one.
+	//
+	// Asserted by property rather than by resource ID on purpose: LVM records
+	// the friendly mapper name (/dev/mapper/luks2-r-lvmenc0), while VolumeStatus
+	// reports the dm path (/dev/dm-0), so an ID derived from MountLocation never
+	// matches even when everything is correct. What matters is which device the
+	// PV landed on, and a PV created on the ciphertext fails the second check.
+	const (
+		assertTimeout  = 90 * time.Second
+		assertInterval = 2 * time.Second
+	)
+
+	ciphertextSet := xslices.ToSet(ciphertext)
+
+	suite.Require().Eventually(func() bool {
+		pvs, err := safe.StateListAll[*storageres.LVMPhysicalVolumeStatus](nodeCtx, suite.Client.COSI)
+		if err != nil {
+			return false
+		}
+
+		found := 0
+
+		for pv := range pvs.All() {
+			spec := pv.TypedSpec()
+			if spec.VGName != vgEnc {
+				continue
+			}
+
+			if _, isCiphertext := ciphertextSet[spec.Device]; isCiphertext {
+				return false
+			}
+
+			found++
+		}
+
+		return found == len(opened)
+	}, assertTimeout, assertInterval,
+		"no PV in %q on the opened device (ciphertext %v, opened %v)", vgEnc, ciphertext, opened)
+
+	suite.assertVGStatus(nodeCtx, vgEnc, opened)
+}

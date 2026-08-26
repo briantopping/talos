@@ -8,6 +8,7 @@ import (
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/ctest"
 	configconfig "github.com/siderolabs/talos/pkg/machinery/config/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/container"
+	blockcfg "github.com/siderolabs/talos/pkg/machinery/config/types/block"
 	storagecfg "github.com/siderolabs/talos/pkg/machinery/config/types/storage"
 	"github.com/siderolabs/talos/pkg/machinery/resources/block"
 	"github.com/siderolabs/talos/pkg/machinery/resources/config"
@@ -103,6 +104,57 @@ func newRAIDDoc(name, match string) *storagecfg.RAIDArrayConfigV1Alpha1 {
 	doc.Level = storageres.MDLevelRAID1
 
 	if err := doc.ProvisioningSpec.RAIDVolumeSelector.Match.UnmarshalText([]byte(match)); err != nil {
+		panic(err)
+	}
+
+	return doc
+}
+
+// createVolumeStatus inserts a block.VolumeStatus describing a volume whose
+// ciphertext (or plain) device lives at location and whose usable device is
+// exposed at mountLocation. For an unencrypted volume the two are equal; for a
+// LUKS2 volume mountLocation is the opened dm device.
+//
+//nolint:unparam
+func createVolumeStatus(
+	suite *ctest.DefaultSuite,
+	id string,
+	phase block.VolumePhase,
+	provider block.EncryptionProviderType,
+	location, mountLocation string,
+) {
+	vs := block.NewVolumeStatus(block.NamespaceName, id)
+	vs.TypedSpec().Phase = phase
+	vs.TypedSpec().EncryptionProvider = provider
+	vs.TypedSpec().Location = location
+	vs.TypedSpec().MountLocation = mountLocation
+
+	suite.Create(vs)
+}
+
+// newEncryptedRawVolumeDoc builds a RawVolumeConfig declaring LUKS2 encryption. Its
+// partition label is constants.RawVolumePrefix + name, matching what the volume config
+// controller stamps on the partition.
+func newEncryptedRawVolumeDoc(name string) *blockcfg.RawVolumeConfigV1Alpha1 {
+	doc := blockcfg.NewRawVolumeConfigV1Alpha1()
+	doc.MetaName = name
+	doc.EncryptionSpec.EncryptionProvider = block.EncryptionProviderLUKS2
+
+	return doc
+}
+
+// newEncryptedWholeDiskUserVolumeDoc builds a UserVolumeConfig that claims an entire
+// device (volumeType: disk) with no filesystem and LUKS2 encryption -- the shape used to
+// encrypt a whole MD array and hand it to LVM. It has no partition and therefore no
+// partition label, so it can only be identified by its disk selector.
+func newEncryptedWholeDiskUserVolumeDoc(name, diskMatch string) *blockcfg.UserVolumeConfigV1Alpha1 {
+	doc := blockcfg.NewUserVolumeConfigV1Alpha1()
+	doc.MetaName = name
+	volumeType := block.VolumeTypeDisk
+	doc.VolumeType = &volumeType
+	doc.EncryptionSpec.EncryptionProvider = block.EncryptionProviderLUKS2
+
+	if err := doc.ProvisioningSpec.DiskSelectorSpec.Match.UnmarshalText([]byte(diskMatch)); err != nil {
 		panic(err)
 	}
 
