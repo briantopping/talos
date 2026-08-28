@@ -190,11 +190,6 @@ func (suite *LVMPhysicalVolumeSpecSuite) TestMultipleVGsDistinctDisks() {
 }
 
 func (suite *LVMPhysicalVolumeSpecSuite) TestSelectsDecryptedDeviceForEncryptedVolume() {
-	// A raw volume partition that carries a LUKS2 container. The selector
-	// matches the GPT partition label (the stable, user-authored identifier),
-	// but the PV must be created on the OPENED device: pvcreate against the
-	// ciphertext either aborts on the crypto_LUKS signature or, with --yes,
-	// would destroy the LUKS header.
 	createDisk(&suite.DefaultSuite, "vdb", "/dev/vdb", "virtio")
 	createPartition(&suite.DefaultSuite, "vdb1", "/dev/vdb1", "/dev/vdb", "r-lvmpv0")
 	createVolumeStatus(
@@ -215,20 +210,9 @@ func (suite *LVMPhysicalVolumeSpecSuite) TestSelectsDecryptedDeviceForEncryptedV
 }
 
 func (suite *LVMPhysicalVolumeSpecSuite) TestSkipsEncryptedVolumeNotYetOpen() {
-	// The LUKS container has not been opened yet (no MountLocation). Until it
-	// is, there is no device to make a PV out of, and the ciphertext partition
-	// is not a substitute.
 	createDisk(&suite.DefaultSuite, "vdb", "/dev/vdb", "virtio")
 	createPartition(&suite.DefaultSuite, "vdb1", "/dev/vdb1", "/dev/vdb", "r-lvmpv0")
-	// A plain partition matched by the same selector: it is the positive
-	// control. Waiting for its PV proves the controller reconciled, so the
-	// absence assertions below are not merely observed too early.
 	createPartition(&suite.DefaultSuite, "vdb2", "/dev/vdb2", "/dev/vdb", "r-lvmpv1")
-	// NOTE the provider is None, not LUKS2: HandleEncryption assigns
-	// Status.EncryptionProvider only AFTER a successful open, so this is what a
-	// still-locked encrypted volume actually reports. A fixture using LUKS2 here
-	// would describe a state the volume manager never produces, and would pass
-	// against a controller that keys its decision off the provider.
 	createVolumeStatus(
 		&suite.DefaultSuite, "lvmpv0",
 		block.VolumePhaseWaiting, block.EncryptionProviderNone,
@@ -246,9 +230,6 @@ func (suite *LVMPhysicalVolumeSpecSuite) TestSkipsEncryptedVolumeNotYetOpen() {
 }
 
 func (suite *LVMPhysicalVolumeSpecSuite) TestUnencryptedVolumeStatusDoesNotRedirect() {
-	// HandleEncryption sets MountLocation == Location for unencrypted volumes,
-	// so a VolumeStatus being present must not change the device selection.
-	// This is the no-regression control for the redirect above.
 	createDisk(&suite.DefaultSuite, "vdb", "/dev/vdb", "virtio")
 	createPartition(&suite.DefaultSuite, "vdb1", "/dev/vdb1", "/dev/vdb", "r-lvmpv0")
 	createVolumeStatus(
@@ -265,14 +246,8 @@ func (suite *LVMPhysicalVolumeSpecSuite) TestUnencryptedVolumeStatusDoesNotRedir
 }
 
 func (suite *LVMPhysicalVolumeSpecSuite) TestSkipsConfiguredEncryptedVolumeBeforeStatusLocation() {
-	// Startup ordering: the machine config, discovered volume and volume status
-	// controllers are not ordered against each other. A freshly created VolumeStatus
-	// is Waiting with an empty Location, so nothing about the status yet says this
-	// device is a LUKS container. The config does, and it says so immediately.
 	createDisk(&suite.DefaultSuite, "vdb", "/dev/vdb", "virtio")
 	createPartition(&suite.DefaultSuite, "vdb1", "/dev/vdb1", "/dev/vdb", "r-lvmpv0")
-	// Positive control: a plain partition matched by the same selector. Waiting for
-	// its PV proves the controller reconciled, so the absence below is a real absence.
 	createPartition(&suite.DefaultSuite, "vdb2", "/dev/vdb2", "/dev/vdb", "r-plain0")
 	createVolumeStatus(
 		&suite.DefaultSuite, "lvmpv0",
@@ -293,10 +268,6 @@ func (suite *LVMPhysicalVolumeSpecSuite) TestSkipsConfiguredEncryptedVolumeBefor
 }
 
 func (suite *LVMPhysicalVolumeSpecSuite) TestSkipsConfiguredEncryptedVolumeWithNoStatus() {
-	// A configured encrypted volume that has NEVER had a VolumeStatus: the
-	// status controller has not run yet. Absence of a status must not read as
-	// "plain device". The destroy-after-resolve sequence is covered separately
-	// by TestSkipsEncryptedVolumeAfterStatusDestroyed.
 	createDisk(&suite.DefaultSuite, "vdb", "/dev/vdb", "virtio")
 	createPartition(&suite.DefaultSuite, "vdb1", "/dev/vdb1", "/dev/vdb", "r-lvmpv0")
 	createPartition(&suite.DefaultSuite, "vdb2", "/dev/vdb2", "/dev/vdb", "r-plain0")
@@ -313,12 +284,6 @@ func (suite *LVMPhysicalVolumeSpecSuite) TestSkipsConfiguredEncryptedVolumeWithN
 	ctest.AssertNoResource[*storageres.LVMPhysicalVolumeSpec](suite, "vdb1")
 }
 
-// TestSkipsEncryptedVolumeAfterStatusDestroyed covers the teardown window: the
-// volume resolves normally, then its VolumeStatus is destroyed while the
-// ciphertext DiscoveredVolume still exists. The controller must not fall back
-// to emitting the ciphertext device once the status it was resolving through
-// disappears. This exercises the DELETION SEQUENCE, not merely the end state --
-// a controller that only ever saw a missing status would pass without it.
 func (suite *LVMPhysicalVolumeSpecSuite) TestSkipsEncryptedVolumeAfterStatusDestroyed() {
 	createDisk(&suite.DefaultSuite, "vdb", "/dev/vdb", "virtio")
 	createPartition(&suite.DefaultSuite, "vdb1", "/dev/vdb1", "/dev/vdb", "r-lvmpv0")
@@ -333,8 +298,6 @@ func (suite *LVMPhysicalVolumeSpecSuite) TestSkipsEncryptedVolumeAfterStatusDest
 		newVGDoc("vg-pool", `volume.partition_label.startsWith("r-")`),
 	)
 
-	// It resolves to the opened device first, so the destroy below is a real
-	// transition rather than a state the controller was always in.
 	ctest.AssertResource(suite, "dm-0", func(pv *storageres.LVMPhysicalVolumeSpec, asrt *assert.Assertions) {
 		asrt.Equal("/dev/dm-0", pv.TypedSpec().Device)
 	})
@@ -342,11 +305,6 @@ func (suite *LVMPhysicalVolumeSpecSuite) TestSkipsEncryptedVolumeAfterStatusDest
 	vs := block.NewVolumeStatus(block.NamespaceName, "r-lvmpv0")
 	suite.Destroy(vs)
 
-	// The barrier has to be satisfiable ONLY AFTER the destroy, or it proves
-	// nothing: vdb2 was already emitted above, so re-asserting it would pass
-	// without the controller ever re-running. This partition appears now, so
-	// its PV can only exist if reconciliation happened after the status went
-	// away -- which is the window under test.
 	createPartition(&suite.DefaultSuite, "vdb3", "/dev/vdb3", "/dev/vdb", "r-plain1")
 
 	ctest.AssertResource(suite, "vdb3", func(pv *storageres.LVMPhysicalVolumeSpec, asrt *assert.Assertions) {
@@ -357,14 +315,6 @@ func (suite *LVMPhysicalVolumeSpecSuite) TestSkipsEncryptedVolumeAfterStatusDest
 }
 
 func (suite *LVMPhysicalVolumeSpecSuite) TestWaitsForVolumeManagerOnUnencryptedVolume() {
-	// Deliberate consequence of keying on MountLocation: a volume the manager has
-	// LOCATED but not yet PREPARED has Location set and MountLocation still empty
-	// (locate.go sets Location at Located/Provisioned; HandleEncryption sets
-	// MountLocation at Prepared). Such a device is not offered to pvcreate yet even
-	// though it is not encrypted -- the volume manager has not finished with it.
-	//
-	// Pinned as a test because it is a behavior change beyond the encryption case,
-	// and should be noticed if anyone narrows the rule later.
 	createDisk(&suite.DefaultSuite, "vdb", "/dev/vdb", "virtio")
 	createPartition(&suite.DefaultSuite, "vdb1", "/dev/vdb1", "/dev/vdb", "r-lvmpv0")
 	createPartition(&suite.DefaultSuite, "vdb2", "/dev/vdb2", "/dev/vdb", "r-plain0")
@@ -385,13 +335,6 @@ func (suite *LVMPhysicalVolumeSpecSuite) TestWaitsForVolumeManagerOnUnencryptedV
 }
 
 func (suite *LVMPhysicalVolumeSpecSuite) TestSkipsEncryptedWholeDiskVolumeBeforeStatus() {
-	// The shape used to encrypt an MD array and hand it to LVM: a UserVolumeConfig
-	// with volumeType: disk claims the ENTIRE device, so there is no partition and no
-	// partition label. It can only be identified by the volume's own disk selector.
-	//
-	// Before the volume manager publishes a status there is nothing else to go on, and
-	// a missing entry must not read as "plain device" -- mdadm's array is a block.Disk
-	// like any other.
 	createDisk(&suite.DefaultSuite, "md0", "/dev/md0", "")
 	createDisk(&suite.DefaultSuite, "vdb", "/dev/vdb", "virtio")
 

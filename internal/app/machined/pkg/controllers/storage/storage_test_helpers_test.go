@@ -110,10 +110,7 @@ func newRAIDDoc(name, match string) *storagecfg.RAIDArrayConfigV1Alpha1 {
 	return doc
 }
 
-// createVolumeStatus inserts a block.VolumeStatus describing a volume whose
-// ciphertext (or plain) device lives at location and whose usable device is
-// exposed at mountLocation. For an unencrypted volume the two are equal; for a
-// LUKS2 volume mountLocation is the opened dm device.
+// createVolumeStatus inserts a block.VolumeStatus describing a volume.
 //
 //nolint:unparam
 func createVolumeStatus(
@@ -132,9 +129,7 @@ func createVolumeStatus(
 	suite.Create(vs)
 }
 
-// newEncryptedRawVolumeDoc builds a RawVolumeConfig declaring LUKS2 encryption. Its
-// partition label is constants.RawVolumePrefix + name, matching what the volume config
-// controller stamps on the partition.
+// newEncryptedRawVolumeDoc builds a RawVolumeConfig declaring LUKS2 encryption.
 func newEncryptedRawVolumeDoc(name string) *blockcfg.RawVolumeConfigV1Alpha1 {
 	doc := blockcfg.NewRawVolumeConfigV1Alpha1()
 	doc.MetaName = name
@@ -144,9 +139,7 @@ func newEncryptedRawVolumeDoc(name string) *blockcfg.RawVolumeConfigV1Alpha1 {
 }
 
 // newEncryptedWholeDiskUserVolumeDoc builds a UserVolumeConfig that claims an entire
-// device (volumeType: disk) with no filesystem and LUKS2 encryption -- the shape used to
-// encrypt a whole MD array and hand it to LVM. It has no partition and therefore no
-// partition label, so it can only be identified by its disk selector.
+// device (volumeType: disk) with no filesystem and LUKS2 encryption
 func newEncryptedWholeDiskUserVolumeDoc(name, diskMatch string) *blockcfg.UserVolumeConfigV1Alpha1 {
 	doc := blockcfg.NewUserVolumeConfigV1Alpha1()
 	doc.MetaName = name

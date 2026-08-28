@@ -219,11 +219,7 @@ func (ctrl *LVMPhysicalVolumeSpecController) matchVolumesToVG(
 			continue
 		}
 
-		// An encrypted volume is selected by the properties of its ciphertext
-		// partition (the GPT label the operator wrote), but the PV belongs on
-		// the OPENED device. pvcreate is run without --yes, so handing it the
-		// ciphertext would abort on the crypto_LUKS signature rather than
-		// produce a PV.
+		// An encrypted volume is selected by the properties of the GPT label the operator wrote
 		devPath, ready := resolver.resolve(vol.DevPath)
 		if !ready {
 			logger.Debug(
@@ -328,26 +324,11 @@ func buildMatchContexts(ctx context.Context, r controller.Runtime) ([]blockhelpe
 	return blockhelpers.BuildMatchContexts(slices.Collect(disks.All()), slices.Collect(volumes.All()), systemDiskDevPath)
 }
 
-// encryptionResolver maps the device a VG selector matched to the device a
-// physical volume must actually be created on.
-//
-// A selector addresses an encrypted volume through the properties of its
-// ciphertext partition -- `volume.partition_label`, the label the operator
-// wrote -- because those are the stable, user-authored identifiers. The opened
-// device carries none of them: it is DEVTYPE=disk, so DevicesController leaves
-// its Parent empty and it has no partition label, and its /dev/dm-N path is
-// assigned in open order. VolumeStatus is what bridges the two.
 type encryptionResolver struct {
-	// resolved maps VolumeStatus.Location to VolumeStatus.MountLocation for
-	// volumes whose usable device differs from the one the selector sees.
 	resolved map[string]string
-	// pending holds Locations of encrypted volumes that are not open yet.
-	pending map[string]struct{}
+	pending  map[string]struct{}
 }
 
-// resolve returns the device to create the PV on. The second return value is
-// false when the volume is encrypted but not yet unlocked, in which case the
-// caller must skip it: the ciphertext device is not a substitute.
 func (e encryptionResolver) resolve(devPath string) (string, bool) {
 	if _, notReady := e.pending[devPath]; notReady {
 		return "", false
@@ -361,11 +342,6 @@ func (e encryptionResolver) resolve(devPath string) (string, bool) {
 }
 
 // buildEncryptionResolver indexes VolumeStatus by Location.
-//
-// HandleEncryption sets MountLocation == Location for unencrypted volumes and
-// to the opened dm device for LUKS2 ones, so a device only gets an entry when
-// its usable path differs from the one the selector matched, or when no usable
-// path exists yet; every other device resolves to itself.
 func buildEncryptionResolver(ctx context.Context, r controller.Runtime, cfg configconfig.Config, contexts []blockhelpers.MatchContext) (encryptionResolver, error) {
 	statuses, err := safe.ReaderListAll[*block.VolumeStatus](ctx, r)
 	if err != nil {
@@ -398,15 +374,6 @@ func buildEncryptionResolver(ctx context.Context, r controller.Runtime, cfg conf
 		}
 	}
 
-	// A VolumeStatus is not an authoritative statement that a device is plaintext:
-	// it is created empty (Waiting, no Location), the controllers publishing it are
-	// not ordered against this one, and it is destroyed on teardown while the
-	// ciphertext DiscoveredVolume still exists. In all three windows the loop above
-	// records nothing, and a missing entry would otherwise read as "plain device".
-	//
-	// The machine config does not have those windows, so configured-encrypted raw
-	// volumes are classified from it directly: a device carrying such a volume's
-	// partition label is unusable until its opened device is known.
 	if err := markConfiguredEncrypted(contexts, cfg, &resolver); err != nil {
 		return encryptionResolver{}, err
 	}
@@ -414,9 +381,6 @@ func buildEncryptionResolver(ctx context.Context, r controller.Runtime, cfg conf
 	return resolver, nil
 }
 
-// encryptedVolumeMatchers collects, from the machine config, how to recognize the
-// devices that configured-encrypted volumes will claim: partition labels for volumes
-// provisioned as partitions, and disk selectors for volumes claiming a whole device.
 func encryptedVolumeMatchers(cfg configconfig.Config) (map[string]struct{}, []cel.Expression) {
 	var (
 		labels    = map[string]struct{}{}
@@ -454,20 +418,6 @@ func encryptedVolumeMatchers(cfg configconfig.Config) (map[string]struct{}, []ce
 	return labels, selectors
 }
 
-// markConfiguredEncrypted marks every device that a configured-encrypted volume will
-// claim as pending, unless the volume manager has already published its opened device.
-//
-// Two shapes have to be covered, because Talos expresses encryption on both:
-//
-//   - a volume provisioned as a PARTITION (RawVolumeConfig, and UserVolumeConfig /
-//     SwapVolumeConfig in their default form) is found by its partition label, which is
-//     the volume ID the volume config controller stamps on it;
-//   - a volume provisioned as a whole DISK (UserVolumeConfig with volumeType: disk) has
-//     no partition and no label, and is found by evaluating the volume's own disk
-//     selector -- the same expression the volume manager will use.
-//
-// The whole-disk shape is what an encrypted MD array looks like: the array is a
-// block.Disk, the volume claims all of it, and nothing about it carries a label.
 func markConfiguredEncrypted(contexts []blockhelpers.MatchContext, cfg configconfig.Config, resolver *encryptionResolver) error {
 	if cfg == nil {
 		return nil
@@ -501,8 +451,6 @@ func markConfiguredEncrypted(contexts []blockhelpers.MatchContext, cfg configcon
 	return nil
 }
 
-// matchesEncryptedVolume reports whether a discovered device is one a configured
-// encrypted volume will claim, by partition label or by the volume's disk selector.
 func matchesEncryptedVolume(c blockhelpers.MatchContext, labels map[string]struct{}, selectors []cel.Expression) (bool, error) {
 	if len(labels) > 0 {
 		if spec, ok := c.CELContext["volume"].(*blockpb.DiscoveredVolumeSpec); ok && spec != nil {

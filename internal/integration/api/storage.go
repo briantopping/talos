@@ -1629,11 +1629,7 @@ func init() {
 	allSuites = append(allSuites, new(StorageSuite))
 }
 
-// encryptedRawVolumeDoc builds a RawVolumeConfig like rawVolumeDoc, LUKS2
-// encrypted with a static key. RawVolumeConfig is the only document that can
-// express an encrypted block device with no filesystem: UserVolumeConfig
-// coerces `filesystem: none` to XFS in FilesystemSpec.Type(), which formats and
-// mounts the device and so leaves LVM nothing to claim.
+// encryptedRawVolumeDoc builds a RawVolumeConfig like rawVolumeDoc, LUKS2 encrypted with a static key.
 func encryptedRawVolumeDoc(name, diskMatch, maxSize, passphrase string) *blockcfg.RawVolumeConfigV1Alpha1 {
 	doc := rawVolumeDoc(name, diskMatch, maxSize)
 	doc.EncryptionSpec = blockcfg.EncryptionSpec{
@@ -1649,10 +1645,7 @@ func encryptedRawVolumeDoc(name, diskMatch, maxSize, passphrase string) *blockcf
 	return doc
 }
 
-// provisionEncryptedRawVolumes creates encrypted raw volumes on the disk matched
-// by diskMatch and returns, per volume, the ciphertext partition (Location, the
-// device a VG selector can name) and the opened device (MountLocation, the only
-// device a PV may be created on).
+// provisionEncryptedRawVolumes creates encrypted raw volumes on the disk matched by diskMatch
 func (suite *StorageSuite) provisionEncryptedRawVolumes(
 	nodeCtx context.Context, diskMatch, passphrase string, names ...string,
 ) (ciphertext, opened []string) {
@@ -1708,15 +1701,7 @@ func (suite *StorageSuite) volumeError(nodeCtx context.Context, volumeID string)
 	return fmt.Sprintf("phase %s: %s", vs.TypedSpec().Phase, vs.TypedSpec().ErrorMessage)
 }
 
-// TestLVMOnEncryptedRawVolumes provisions a VG backed by ENCRYPTED raw volume
-// partitions.
-//
-// A VG selector can only name the ciphertext partition -- `volume.partition_label`
-// is a property of the partition, and the opened dm device carries no label --
-// so the device the selector matches is not the device the PV may be created on.
-// LVM has to wait for LUKS to open and then use the opened device. Creating the
-// PV on the ciphertext writes an LVM label over the LUKS header and leaves the
-// volume permanently failed with "block dev type mismatch: lvm2-pv != luks".
+// TestLVMOnEncryptedRawVolumes provisions a VG backed by ENCRYPTED raw volume partitions.
 //
 //nolint:gocyclo
 func (suite *StorageSuite) TestLVMOnEncryptedRawVolumes() {
@@ -1766,9 +1751,6 @@ func (suite *StorageSuite) TestLVMOnEncryptedRawVolumes() {
 
 	suite.T().Logf("encrypted raw volumes: ciphertext %v, opened %v", ciphertext, opened)
 
-	// Non-vacuity: if the opened device were the same as the ciphertext one the
-	// volume was never actually encrypted, and every assertion below would pass
-	// without covering the case this test exists for.
 	for i := range ciphertext {
 		suite.Require().NotEqual(ciphertext[i], opened[i], "volume %q is not encrypted", rawNames[i])
 	}
@@ -1776,12 +1758,6 @@ func (suite *StorageSuite) TestLVMOnEncryptedRawVolumes() {
 	suite.PatchMachineConfig(nodeCtx, vgDocSelector(vgEnc, `volume.partition_label.startsWith("r-lvmenc")`))
 
 	// The PV must exist on the OPENED device, and NOT on the ciphertext one.
-	//
-	// Asserted by property rather than by resource ID on purpose: LVM records
-	// the friendly mapper name (/dev/mapper/luks2-r-lvmenc0), while VolumeStatus
-	// reports the dm path (/dev/dm-0), so an ID derived from MountLocation never
-	// matches even when everything is correct. What matters is which device the
-	// PV landed on, and a PV created on the ciphertext fails the second check.
 	const (
 		assertTimeout  = 90 * time.Second
 		assertInterval = 2 * time.Second
