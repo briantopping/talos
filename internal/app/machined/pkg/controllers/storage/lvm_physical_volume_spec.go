@@ -378,6 +378,8 @@ func buildEncryptionResolver(ctx context.Context, r controller.Runtime, cfg conf
 		return encryptionResolver{}, err
 	}
 
+	markDiscoveredCiphertext(contexts, &resolver)
+
 	return resolver, nil
 }
 
@@ -416,6 +418,27 @@ func encryptedVolumeMatchers(cfg configconfig.Config) (map[string]struct{}, []ce
 	}
 
 	return labels, selectors
+}
+
+func markDiscoveredCiphertext(contexts []blockhelpers.MatchContext, resolver *encryptionResolver) {
+	for _, c := range contexts {
+		if c.DevPath == "" {
+			continue
+		}
+
+		if _, resolved := resolver.resolved[c.DevPath]; resolved {
+			continue
+		}
+
+		spec, ok := c.CELContext["volume"].(*blockpb.DiscoveredVolumeSpec)
+		if !ok || spec == nil {
+			continue
+		}
+
+		if spec.Name == "luks" {
+			resolver.pending[c.DevPath] = struct{}{}
+		}
+	}
 }
 
 func markConfiguredEncrypted(contexts []blockhelpers.MatchContext, cfg configconfig.Config, resolver *encryptionResolver) error {

@@ -46,6 +46,17 @@ func createPartition(suite *ctest.DefaultSuite, id, devPath, parentDevPath, part
 	suite.Create(dv)
 }
 
+func createLUKSPartition(suite *ctest.DefaultSuite, id, devPath, parentDevPath, partitionLabel string) {
+	dv := block.NewDiscoveredVolume(block.NamespaceName, id)
+	dv.TypedSpec().DevPath = devPath
+	dv.TypedSpec().ParentDevPath = parentDevPath
+	dv.TypedSpec().PartitionLabel = partitionLabel
+	dv.TypedSpec().Type = "partition"
+	dv.TypedSpec().Name = "luks"
+
+	suite.Create(dv)
+}
+
 // newVGDoc builds a minimal v1alpha1 LVMVolumeGroupConfig doc with the given
 // name and CEL match expression for the physical-volume selector.
 func newVGDoc(name, match string) *storagecfg.LVMVolumeGroupConfigV1Alpha1 {

@@ -284,6 +284,22 @@ func (suite *LVMPhysicalVolumeSpecSuite) TestSkipsConfiguredEncryptedVolumeWithN
 	ctest.AssertNoResource[*storageres.LVMPhysicalVolumeSpec](suite, "vdb1")
 }
 
+func (suite *LVMPhysicalVolumeSpecSuite) TestSkipsCiphertextWithNoStatusAndNoConfig() {
+	createDisk(&suite.DefaultSuite, "vdb", "/dev/vdb", "virtio")
+	createLUKSPartition(&suite.DefaultSuite, "vdb1", "/dev/vdb1", "/dev/vdb", "r-lvmpv0")
+	createPartition(&suite.DefaultSuite, "vdb2", "/dev/vdb2", "/dev/vdb", "r-plain0")
+
+	applyMachineConfigDocs(&suite.DefaultSuite,
+		newVGDoc("vg-pool", `volume.partition_label.startsWith("r-")`),
+	)
+
+	ctest.AssertResource(suite, "vdb2", func(pv *storageres.LVMPhysicalVolumeSpec, asrt *assert.Assertions) {
+		asrt.Equal("/dev/vdb2", pv.TypedSpec().Device)
+	})
+
+	ctest.AssertNoResource[*storageres.LVMPhysicalVolumeSpec](suite, "vdb1")
+}
+
 func (suite *LVMPhysicalVolumeSpecSuite) TestSkipsEncryptedVolumeAfterStatusDestroyed() {
 	createDisk(&suite.DefaultSuite, "vdb", "/dev/vdb", "virtio")
 	createPartition(&suite.DefaultSuite, "vdb1", "/dev/vdb1", "/dev/vdb", "r-lvmpv0")
