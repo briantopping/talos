@@ -1749,12 +1749,53 @@ func ForceCleanup(runtime.Sequence, any) (runtime.TaskExecutionFunc, string) {
 	}, "forceCleanup"
 }
 
+const metaWaitTimeout = 90 * time.Second
+
+func pendingRAIDMembers(ctx context.Context, r runtime.Runtime) bool {
+	volumes, err := safe.StateListAll[*blockres.DiscoveredVolume](ctx, r.State().V1Alpha2().Resources())
+	if err != nil {
+		return false
+	}
+
+	for volume := range volumes.All() {
+		if volume.TypedSpec().Name == "linux_raid_member" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func waitForMeta(ctx context.Context, r runtime.Runtime) error {
+	ctx, cancel := context.WithTimeout(ctx, metaWaitTimeout)
+	defer cancel()
+
+	if _, err := blockres.WaitForVolumePhase(ctx, r.State().V1Alpha2().Resources(), constants.MetaPartitionLabel, blockres.VolumePhaseReady); err != nil {
+		return err
+	}
+
+	return r.State().Machine().Meta().Reload(ctx)
+}
+
 // ReloadMeta reloads META partition after disk mount, installer run, etc.
 //
 //nolint:gocyclo
 func ReloadMeta(runtime.Sequence, any) (runtime.TaskExecutionFunc, string) {
 	return func(ctx context.Context, logger *log.Logger, r runtime.Runtime) error {
 		err := r.State().Machine().Meta().Reload(ctx)
+
+		if errors.Is(err, fs.ErrNotExist) && pendingRAIDMembers(ctx, r) {
+			logger.Printf("META not found and unassembled RAID members are present; waiting for the array")
+
+			if waitErr := waitForMeta(ctx, r); waitErr != nil {
+				logger.Printf("META did not appear within %s: %s", metaWaitTimeout, waitErr)
+			} else {
+				logger.Printf("META loaded after waiting for the array")
+
+				err = nil
+			}
+		}
+
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
