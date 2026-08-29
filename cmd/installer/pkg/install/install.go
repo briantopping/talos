@@ -349,6 +349,26 @@ func (i *Installer) Install(ctx context.Context, mode Mode) (err error) {
 		i.errataNetIfnames(hostTalosVersion)
 	}
 
+	// A mirrored ESP is discovered, never configured: naming /dev/mdN in config would
+	// pin a kernel-assigned number that is not stable across boots, and the members
+	// already say which array is the ESP by carrying the EFI System Partition type.
+	if mode == ModeInstall && i.options.ESPDevice == "" {
+		esp, espErr := DiscoverMirroredESP()
+		if espErr != nil {
+			return espErr
+		}
+
+		if esp != "" {
+			i.options.Printf("using mirrored ESP %s", esp)
+
+			if espErr = EnsureESPFilesystem(ctx, esp, i.options.Version, i.options.Printf); espErr != nil {
+				return espErr
+			}
+
+			i.options.ESPDevice = esp
+		}
+	}
+
 	if err = i.runPreflightChecks(mode); err != nil {
 		return err
 	}
