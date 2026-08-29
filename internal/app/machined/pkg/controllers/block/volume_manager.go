@@ -376,7 +376,20 @@ func (ctrl *VolumeManagerController) Run(ctx context.Context, r controller.Runti
 
 			// if the volume is not ready yet, we can consider the wave not fully provisioned, so the next wave can't start provisioning either
 			// but if the volume doesn't have provisioning instructions, we don't block on it being ready
-			if volumeStatus.TypedSpec().Phase != block.VolumePhaseReady && !value.IsZero(vc.TypedSpec().Provisioning) {
+			//
+			// WaveBootDisk is exempt. Those volumes are the MEMBERS of a mirror, and a
+			// member whose disk is gone is precisely what the mirror exists to survive:
+			// it can never be located and never be provisioned, so capping the wave on it
+			// stalls every later wave for as long as the disk stays missing. Measured: a
+			// node booting on one disk of a two-disk mirror reached STATE and then waited
+			// forever, because EPHEMERAL sits in a later wave than the dead member. The
+			// reason for the cap does not apply either -- it exists so a later volume does
+			// not consume space an earlier one still needs, and an absent disk has no
+			// space to contend for. What the array is missing is reported by the array,
+			// which knows how many members it has.
+			if volumeStatus.TypedSpec().Phase != block.VolumePhaseReady &&
+				!value.IsZero(vc.TypedSpec().Provisioning) &&
+				vc.TypedSpec().Provisioning.Wave != block.WaveBootDisk {
 				fullyProvisionedWave = vc.TypedSpec().Provisioning.Wave - 1
 			}
 
