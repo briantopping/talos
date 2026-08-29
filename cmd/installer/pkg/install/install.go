@@ -51,6 +51,11 @@ type Options struct {
 	ConfigSource string
 	// Can be an actual disk path or a file representing a disk image.
 	DiskPath            string
+	// ESPDevice, when set, is an already-formatted VFAT device to install the
+	// bootloader into rather than creating an ESP on DiskPath. Set it to an md
+	// raid1 array at metadata 1.0 and the ESP is mirrored: the superblock sits at
+	// each member's end, so firmware still reads a member as a plain FAT ESP.
+	ESPDevice           string
 	Platform            string
 	Arch                string
 	ExtraKernelArgs     []string
@@ -543,6 +548,7 @@ func (i *Installer) handleMeta(ctx context.Context, mode Mode, previousLabel str
 func (i *Installer) generateBootloaderOptions(ctx context.Context, mode Mode, info *blkid.Info) bootloaderoptions.InstallOptions {
 	return bootloaderoptions.InstallOptions{
 		BootDisk:          i.options.DiskPath,
+		ESPDevice:         i.options.ESPDevice,
 		Arch:              i.options.Arch,
 		Cmdline:           i.cmdline.String(),
 		GrubUseUKICmdline: i.options.GrubUseUKICmdline,

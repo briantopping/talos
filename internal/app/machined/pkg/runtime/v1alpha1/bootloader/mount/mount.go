@@ -30,6 +30,41 @@ type Spec struct {
 // NotFoundTag is a tag for a partition not found/mismatch errors.
 type NotFoundTag struct{}
 
+// DeviceOp mounts a whole device, executes the operation func, and unmounts it.
+//
+// PartitionOp resolves a partition by GPT label on a disk. A device that carries a
+// filesystem directly and no partition table -- an md array formatted VFAT, which is
+// how a mirrored ESP is expressed -- has no partition to resolve, so the lookup can
+// never match and the label is not a way to reach it.
+func DeviceOp(
+	dev string, spec Spec, opFunc func() error,
+	mountOptions []mount.ManagerOption,
+	filesystemOptions []fsopen.Option,
+) error {
+	manager := mount.NewManager(slices.Concat(
+		[]mount.ManagerOption{
+			mount.WithTarget(spec.MountTarget),
+			mount.WithFsopen(
+				spec.FilesystemType,
+				slices.Concat(
+					[]fsopen.Option{fsopen.WithSource(dev)},
+					filesystemOptions,
+				)...,
+			),
+		},
+		mountOptions,
+	)...)
+
+	unmounter, err := mount.Managers{manager}.Mount()
+	if err != nil {
+		return fmt.Errorf("error mounting %s: %w", dev, err)
+	}
+
+	defer unmounter() //nolint:errcheck
+
+	return opFunc()
+}
+
 // PartitionOp mounts specified partitions with the specified label, executes the operation func, and unmounts the partition(s).
 func PartitionOp(
 	disk string, specs []Spec, opFunc func() error,

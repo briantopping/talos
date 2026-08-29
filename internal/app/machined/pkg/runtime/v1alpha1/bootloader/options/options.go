@@ -17,6 +17,12 @@ import (
 type InstallOptions struct {
 	// The disk to install to.
 	BootDisk string
+	// ESPDevice, when set, is an already-formatted VFAT device to install the
+	// bootloader into, instead of a partition the installer creates on BootDisk.
+	// It exists so the ESP can be an md raid1 array at metadata 1.0: the superblock
+	// sits at the member's end, so firmware still reads each member as an ordinary
+	// FAT ESP and the mirror is bootable from either disk.
+	ESPDevice string
 	// Target architecture.
 	Arch string
 	// Kernel command line (grub only, and only if GrubUseUKICmdline is false).

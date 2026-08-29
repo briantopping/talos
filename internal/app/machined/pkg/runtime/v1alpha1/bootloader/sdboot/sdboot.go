@@ -316,6 +316,13 @@ func (c *Config) PrepareBootPartitions(opts options.InstallOptions) ([]partition
 		formatOptions = append(formatOptions, partition.WithSourceDirectory(filepath.Join(opts.MountPrefix, "EFI")))
 	}
 
+	if opts.ESPDevice != "" {
+		// The ESP already exists as a device of its own; creating a second one on the
+		// install target would leave two, and firmware would have no way to tell which
+		// carries the UKI that matches this install.
+		return nil, nil
+	}
+
 	partitionOptions := []partition.Options{
 		partition.NewPartitionOptions(
 			true,
@@ -364,15 +371,43 @@ func (c *Config) Install(opts options.InstallOptions) (*options.InstallResult, e
 
 	var installResult *options.InstallResult
 
+	espSpec := mount.Spec{
+		PartitionLabel: constants.EFIPartitionLabel,
+		FilesystemType: partition.FilesystemTypeVFAT,
+		MountTarget:    filepath.Join(opts.MountPrefix, constants.EFIMountPoint),
+	}
+
+	install := func() error {
+		if err := c.copyAssets(opts, ukiFileName); err != nil {
+			return err
+		}
+
+		var err error
+
+		installResult, err = c.setup(opts, ukiFileName)
+
+		return err
+	}
+
+	// A supplied ESP is a device carrying VFAT directly -- an md array -- with no
+	// partition table, so there is no GPT label to resolve and it is mounted as-is.
+	if opts.ESPDevice != "" {
+		if err = mount.DeviceOp(
+			opts.ESPDevice,
+			espSpec,
+			install,
+			[]mountv3.ManagerOption{},
+			nil,
+		); err != nil {
+			return nil, err
+		}
+
+		return installResult, nil
+	}
+
 	err = mount.PartitionOp(
 		opts.BootDisk,
-		[]mount.Spec{
-			{
-				PartitionLabel: constants.EFIPartitionLabel,
-				FilesystemType: partition.FilesystemTypeVFAT,
-				MountTarget:    filepath.Join(opts.MountPrefix, constants.EFIMountPoint),
-			},
-		},
+		[]mount.Spec{espSpec},
 		func() error {
 			if err := c.copyAssets(opts, ukiFileName); err != nil {
 				return err
