@@ -63,6 +63,14 @@ type VolumeConfigSpec struct {
 
 // Wave constants.
 const (
+	// WaveBootDisk is provisioned before the system disk exists.
+	//
+	// The system disk is created by the installer, so every wave from WaveSystemDisk
+	// onwards is unreachable until an install has run: STATE cannot locate its disk,
+	// which caps the provisioned wave and stalls every later wave behind it. A volume
+	// the INSTALLER itself needs -- a partition backing a RAID array which is the
+	// install target, or which carries the ESP -- therefore cannot live in any of them.
+	WaveBootDisk        = -2
 	WaveSystemDisk      = -1
 	WaveUserVolumes     = 0
 	WaveLegacyUserDisks = 1000000 // legacy user disks rely on specific order of provisioning

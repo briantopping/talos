@@ -155,6 +155,12 @@ func RawVolumeTransformer(c configconfig.Config) ([]VolumeResource, error) {
 
 	for _, rawVolumeConfig := range c.RawVolumeConfigs() {
 		volumeID := constants.RawVolumePrefix + rawVolumeConfig.Name()
+
+		wave := block.WaveUserVolumes
+		if rawVolumeConfig.ProvisionBeforeInstall() {
+			wave = block.WaveBootDisk
+		}
+
 		resources = append(resources, VolumeResource{
 			VolumeID: volumeID,
 			Label:    block.RawVolumeLabel,
@@ -162,7 +168,7 @@ func RawVolumeTransformer(c configconfig.Config) ([]VolumeResource, error) {
 				WithType(block.VolumeTypePartition).
 				WithLocator(labelVolumeMatch(volumeID)).
 				WithProvisioning(block.ProvisioningSpec{
-					Wave: block.WaveUserVolumes,
+					Wave: wave,
 					DiskSelector: block.DiskSelector{
 						Match: rawVolumeConfig.Provisioning().DiskSelector().ValueOr(noMatch),
 					},
