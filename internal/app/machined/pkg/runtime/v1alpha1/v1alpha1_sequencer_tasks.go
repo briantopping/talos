@@ -71,6 +71,7 @@ import (
 	resourcefiles "github.com/siderolabs/talos/pkg/machinery/resources/files"
 	"github.com/siderolabs/talos/pkg/machinery/resources/k8s"
 	resourceruntime "github.com/siderolabs/talos/pkg/machinery/resources/runtime"
+	storageres "github.com/siderolabs/talos/pkg/machinery/resources/storage"
 	resourcev1alpha1 "github.com/siderolabs/talos/pkg/machinery/resources/v1alpha1"
 	"github.com/siderolabs/talos/pkg/minimal"
 )
@@ -1499,6 +1500,70 @@ func UnmountPromotableSystemPartitions(runtime.Sequence, any) (runtime.TaskExecu
 	}, "unmountPromotableSystemPartitions"
 }
 
+const mdArrayWaitTimeout = 60 * time.Second
+
+// waitForDeclaredMDArrays waits for every md (software RAID) array the machine config
+// declares to be assembled, before the installer runs.
+//
+// The install sequence and the volume manager run concurrently, and install wins by
+// well under a second, so an array declared in the config does not exist yet at the
+// moment the installer looks for it. Nothing reports that. The installer falls back
+// to whatever it can find -- an ordinary ESP on its install target, or a plain disk
+// where /dev/md/<name> was asked for -- and the install SUCCEEDS. The mirror simply
+// is not one, and only a later disk failure says so.
+//
+// Waiting for the member volumes would not be enough: what the installer resolves is
+// the assembled array, so that is what this waits for.
+//
+// Gated on the config declaring arrays, so an install without RAID waits for nothing.
+func waitForDeclaredMDArrays(ctx context.Context, logger *log.Logger, r runtime.Runtime) error {
+	names := xslices.Map(r.Config().RAIDArrayConfigs(), func(c configconfig.RAIDArrayConfig) string { return c.Name() })
+
+	if len(names) == 0 {
+		return nil
+	}
+
+	logger.Printf("waiting for the declared RAID arrays: %v", names)
+
+	ctx, cancel := context.WithTimeout(ctx, mdArrayWaitTimeout)
+	defer cancel()
+
+	st := r.State().V1Alpha2().Resources()
+
+	for _, name := range names {
+		arrayStatus, err := st.WatchFor(
+			ctx,
+			storageres.NewMDArrayStatus(storageres.NamespaceName, name).Metadata(),
+			state.WithCondition(func(res resource.Resource) (bool, error) {
+				status, ok := res.(*storageres.MDArrayStatus)
+				if !ok {
+					return false, nil
+				}
+
+				switch status.TypedSpec().Status {
+				// a rebuilding mirror is a usable device: refusing to install into one
+				// would turn a recoverable disk replacement into a blocked install.
+				case storageres.MDArrayPhaseReady, storageres.MDArrayPhaseRebuilding:
+					return true, nil
+				case storageres.MDArrayPhaseError:
+					return false, fmt.Errorf("RAID array %q failed to assemble: %s", name, status.TypedSpec().Error)
+				case storageres.MDArrayPhaseUnknown, storageres.MDArrayPhaseWaiting:
+					return false, nil
+				default:
+					return false, nil
+				}
+			}),
+		)
+		if err != nil {
+			return fmt.Errorf("error waiting for RAID array %q: %w", name, err)
+		}
+
+		logger.Printf("RAID array %q assembled: %s", name, arrayStatus.(*storageres.MDArrayStatus).TypedSpec().Device)
+	}
+
+	return nil
+}
+
 // Install mounts or installs the system partitions.
 //
 //nolint:gocyclo,cyclop
@@ -1515,6 +1580,9 @@ func Install(runtime.Sequence, any) (runtime.TaskExecutionFunc, string) {
 
 			if err = crires.WaitForImageCache(ctx, r.State().V1Alpha2().Resources()); err != nil {
 				return fmt.Errorf("failed to wait for the image cache: %w", err)
+			}
+			if err = waitForDeclaredMDArrays(ctx, logger, r); err != nil {
+				return err
 			}
 
 			var disk string
