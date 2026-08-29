@@ -13,6 +13,15 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 )
 
+// ESPMember is one physical EFI System Partition backing a mirrored ESP.
+type ESPMember struct {
+	// Disk is the device path of the disk holding the partition.
+	Disk string
+	// Partition is the partition's device NAME (e.g. "vda1"), as it appears under
+	// /sys/block/<array>/slaves.
+	Partition string
+}
+
 // InstallOptions configures bootloader installation.
 type InstallOptions struct {
 	// The disk to install to.
@@ -23,6 +32,10 @@ type InstallOptions struct {
 	// sits at the member's end, so firmware still reads each member as an ordinary
 	// FAT ESP and the mirror is bootable from either disk.
 	ESPDevice string
+	// ESPMembers are the physical partitions backing ESPDevice, as parent-disk paths.
+	// Firmware boots a partition on a real disk and knows nothing about md, so the
+	// UEFI boot entries must name these, not the array.
+	ESPMembers []ESPMember
 	// Target architecture.
 	Arch string
 	// Kernel command line (grub only, and only if GrubUseUKICmdline is false).

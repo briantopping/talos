@@ -542,9 +542,9 @@ func (c *Config) setup(opts options.InstallOptions, ukiFileName string) (*option
 
 	defer efiRW.Close() //nolint:errcheck
 
-	blkidInfo, err := blkid.ProbePath(opts.BootDisk, blkid.WithSkipLocking(true))
+	targets, err := bootTargets(opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to probe block device %s: %w", opts.BootDisk, err)
+		return nil, err
 	}
 
 	sdbootFilename, err := bootloaderutils.Name(opts.Arch)
@@ -552,7 +552,7 @@ func (c *Config) setup(opts options.InstallOptions, ukiFileName string) (*option
 		return nil, fmt.Errorf("failed to get sd-boot file path: %w", err)
 	}
 
-	if err := CreateBootEntry(efiRW, blkidInfo, opts.Printf, sdbootFilename); err != nil {
+	if err := CreateBootEntries(efiRW, targets, opts.Printf, sdbootFilename); err != nil {
 		return nil, fmt.Errorf("failed to create boot entry: %w", err)
 	}
 
@@ -745,4 +745,38 @@ func findNextBootUKIFile(ukiFiles []string, defaultEntry, selectedEntry string) 
 	}
 
 	return findMatchingUKIFile(ukiFiles, selectedEntry)
+}
+
+// bootTargets resolves the ESPs the UEFI boot entries should point at.
+//
+// A mirrored ESP yields one target per member: the array is not something firmware
+// can boot, and naming a single member would leave the machine unbootable exactly
+// when the other disk is the surviving one.
+func bootTargets(opts options.InstallOptions) ([]BootTarget, error) {
+	if len(opts.ESPMembers) == 0 {
+		blkidInfo, err := blkid.ProbePath(opts.BootDisk, blkid.WithSkipLocking(true))
+		if err != nil {
+			return nil, fmt.Errorf("failed to probe block device %s: %w", opts.BootDisk, err)
+		}
+
+		return ESPTargetsFromDisk(blkidInfo)
+	}
+
+	targets := make([]BootTarget, 0, len(opts.ESPMembers))
+
+	for _, member := range opts.ESPMembers {
+		diskInfo, err := blkid.ProbePath(member.Disk, blkid.WithSkipLocking(true))
+		if err != nil {
+			return nil, fmt.Errorf("failed to probe block device %s: %w", member.Disk, err)
+		}
+
+		part, err := FindESPPartition(diskInfo, member.Disk, member.Partition)
+		if err != nil {
+			return nil, err
+		}
+
+		targets = append(targets, BootTarget{Disk: diskInfo, Part: part, Suffix: member.Partition})
+	}
+
+	return targets, nil
 }

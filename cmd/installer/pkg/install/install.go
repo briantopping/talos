@@ -56,6 +56,8 @@ type Options struct {
 	// raid1 array at metadata 1.0 and the ESP is mirrored: the superblock sits at
 	// each member's end, so firmware still reads a member as a plain FAT ESP.
 	ESPDevice           string
+	// ESPMembers are the physical partitions backing ESPDevice.
+	ESPMembers          []bootloaderoptions.ESPMember
 	Platform            string
 	Arch                string
 	ExtraKernelArgs     []string
@@ -353,7 +355,7 @@ func (i *Installer) Install(ctx context.Context, mode Mode) (err error) {
 	// pin a kernel-assigned number that is not stable across boots, and the members
 	// already say which array is the ESP by carrying the EFI System Partition type.
 	if mode == ModeInstall && i.options.ESPDevice == "" {
-		esp, espErr := DiscoverMirroredESP()
+		esp, espMembers, espErr := DiscoverMirroredESP()
 		if espErr != nil {
 			return espErr
 		}
@@ -366,6 +368,7 @@ func (i *Installer) Install(ctx context.Context, mode Mode) (err error) {
 			}
 
 			i.options.ESPDevice = esp
+			i.options.ESPMembers = espMembers
 		}
 	}
 
@@ -569,6 +572,7 @@ func (i *Installer) generateBootloaderOptions(ctx context.Context, mode Mode, in
 	return bootloaderoptions.InstallOptions{
 		BootDisk:          i.options.DiskPath,
 		ESPDevice:         i.options.ESPDevice,
+		ESPMembers:        i.options.ESPMembers,
 		Arch:              i.options.Arch,
 		Cmdline:           i.cmdline.String(),
 		GrubUseUKICmdline: i.options.GrubUseUKICmdline,
