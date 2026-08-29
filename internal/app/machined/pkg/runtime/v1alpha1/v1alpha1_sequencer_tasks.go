@@ -1852,11 +1852,63 @@ func ForceCleanup(runtime.Sequence, any) (runtime.TaskExecutionFunc, string) {
 	}, "forceCleanup"
 }
 
+// waitForMDLastResortSettled waits for last-resort assembly of degraded MD arrays
+// to finish trying, so that reading the disks is not a race against them appearing.
+//
+// An ABSENT status means nothing is going to answer -- the controller does not run
+// in every mode -- so it is treated as settled rather than waited on forever.
+func waitForMDLastResortSettled(ctx context.Context, logger *log.Logger, r runtime.Runtime) error {
+	st := r.State().V1Alpha2().Resources()
+
+	status, err := safe.StateGetByID[*storageres.MDLastResortStatus](ctx, st, storageres.MDLastResortStatusID)
+	if err != nil {
+		if state.IsNotFoundError(err) {
+			return nil
+		}
+
+		return fmt.Errorf("error getting MD last-resort status: %w", err)
+	}
+
+	if status.TypedSpec().Settled {
+		return nil
+	}
+
+	logger.Printf("waiting for degraded RAID array assembly to settle")
+
+	ctx, cancel := context.WithTimeout(ctx, mdArrayWaitTimeout)
+	defer cancel()
+
+	if _, err = st.WatchFor(
+		ctx,
+		storageres.NewMDLastResortStatus(storageres.NamespaceName, storageres.MDLastResortStatusID).Metadata(),
+		state.WithCondition(func(res resource.Resource) (bool, error) {
+			settled, ok := res.(*storageres.MDLastResortStatus)
+
+			return ok && settled.TypedSpec().Settled, nil
+		}),
+	); err != nil {
+		return fmt.Errorf("error waiting for MD last-resort to settle: %w", err)
+	}
+
+	return nil
+}
+
 // ReloadMeta reloads META partition after disk mount, installer run, etc.
 //
 //nolint:gocyclo
 func ReloadMeta(runtime.Sequence, any) (runtime.TaskExecutionFunc, string) {
 	return func(ctx context.Context, logger *log.Logger, r runtime.Runtime) error {
+		// META may live on an md array which has not been assembled yet. Reloading
+		// before it exists reads NOTHING and reports no error -- ErrNotExist is a
+		// legitimate answer for a machine that is not installed -- and the task never
+		// runs again. Measured: on a node booted with one disk of a mirror removed,
+		// reloadMeta completed at 1.5s and META became ready at 30.8s, so the STATE
+		// encryption config stored in META was never loaded and STATE could not be
+		// decrypted at all.
+		if err := waitForMDLastResortSettled(ctx, logger, r); err != nil {
+			return err
+		}
+
 		err := r.State().Machine().Meta().Reload(ctx)
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
