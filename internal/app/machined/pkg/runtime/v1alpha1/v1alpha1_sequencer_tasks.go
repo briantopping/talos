@@ -1500,7 +1500,10 @@ func UnmountPromotableSystemPartitions(runtime.Sequence, any) (runtime.TaskExecu
 	}, "unmountPromotableSystemPartitions"
 }
 
-const mdArrayWaitTimeout = 60 * time.Second
+const (
+	mdArrayWaitTimeout     = 60 * time.Second
+	devicePathPollInterval = 100 * time.Millisecond
+)
 
 // waitForDeclaredMDArrays waits for every md (software RAID) array the machine config
 // declares to be assembled, before the installer runs.
@@ -1558,10 +1561,42 @@ func waitForDeclaredMDArrays(ctx context.Context, logger *log.Logger, r runtime.
 			return fmt.Errorf("error waiting for RAID array %q: %w", name, err)
 		}
 
-		logger.Printf("RAID array %q assembled: %s", name, arrayStatus.(*storageres.MDArrayStatus).TypedSpec().Device)
+		device := arrayStatus.(*storageres.MDArrayStatus).TypedSpec().Device
+
+		if err = waitForDevicePath(ctx, device); err != nil {
+			return fmt.Errorf("RAID array %q assembled but never appeared at %s: %w", name, device, err)
+		}
+
+		logger.Printf("RAID array %q assembled: %s", name, device)
 	}
 
 	return nil
+}
+
+// waitForDevicePath waits for a device path to exist.
+//
+// MDArrayStatus.Device is CONSTRUCTED, not observed -- it is the by-id name the
+// array will have, returned whether or not anything has created it yet. udev makes
+// the symlink a moment after the array appears, so a caller which reads the status
+// and immediately opens the path loses a race it cannot see: the array is genuinely
+// assembled, and the path genuinely does not exist.
+func waitForDevicePath(ctx context.Context, path string) error {
+	ticker := time.NewTicker(devicePathPollInterval)
+	defer ticker.Stop()
+
+	for {
+		if _, err := os.Lstat(path); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // Install mounts or installs the system partitions.
