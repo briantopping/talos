@@ -172,7 +172,7 @@ func RawVolumeTransformer(c configconfig.Config) ([]VolumeResource, error) {
 						RelativeMaxSize: rawVolumeConfig.Provisioning().RelativeMaxSize().ValueOrZero(),
 						Grow:            rawVolumeConfig.Provisioning().Grow().ValueOrZero(),
 						Label:           volumeID,
-						TypeUUID:        partition.LinuxFilesystemData,
+						TypeUUID:        cmp.Or(rawVolumeConfig.PartitionType(), partition.LinuxFilesystemData),
 					},
 					FilesystemSpec: block.FilesystemSpec{
 						Type: block.FilesystemTypeNone,

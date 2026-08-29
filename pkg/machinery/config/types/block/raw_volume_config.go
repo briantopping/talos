@@ -72,6 +72,18 @@ type RawVolumeConfigV1Alpha1 struct {
 	//   description: |
 	//     The encryption describes how the volume is encrypted.
 	EncryptionSpec EncryptionSpec `yaml:"encryption,omitempty"`
+	//   description: |
+	//     The GPT partition type GUID to stamp on the partition.
+	//
+	//     Defaults to Linux filesystem data. Set it to the EFI System Partition GUID
+	//     (C12A7328-F81F-11D2-BA4B-00A0C93EC93B) to make the partition one firmware
+	//     will read as an ESP -- which is what allows a mirrored ESP: an md raid1 at
+	//     metadata 1.0 over two such partitions keeps the superblock at each member's
+	//     end, so firmware still sees a plain FAT ESP on either disk.
+	//   examples:
+	//     - value: >
+	//         "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+	PartitionTypeSpec string `yaml:"partitionType,omitempty"`
 }
 
 // NewRawVolumeConfigV1Alpha1 creates a new raw volume config document.
@@ -160,6 +172,11 @@ func (s *RawVolumeConfigV1Alpha1) Validate(validation.RuntimeMode, ...validation
 
 // RawVolumeConfigSignal is a signal for user volume config.
 func (s *RawVolumeConfigV1Alpha1) RawVolumeConfigSignal() {}
+
+// PartitionType implements config.RawVolumeConfig interface.
+func (s *RawVolumeConfigV1Alpha1) PartitionType() string {
+	return s.PartitionTypeSpec
+}
 
 // Provisioning implements config.RawVolumeConfig interface.
 func (s *RawVolumeConfigV1Alpha1) Provisioning() config.VolumeProvisioningConfig {
