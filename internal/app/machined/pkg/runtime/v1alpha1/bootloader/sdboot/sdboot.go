@@ -316,6 +316,11 @@ func (c *Config) PrepareBootPartitions(opts options.InstallOptions) ([]partition
 		formatOptions = append(formatOptions, partition.WithSourceDirectory(filepath.Join(opts.MountPrefix, "EFI")))
 	}
 
+	if opts.ESPDevice != "" {
+		// the ESP already exists as its own device; a second one would be ambiguous
+		return nil, nil
+	}
+
 	partitionOptions := []partition.Options{
 		partition.NewPartitionOptions(
 			true,
@@ -364,15 +369,42 @@ func (c *Config) Install(opts options.InstallOptions) (*options.InstallResult, e
 
 	var installResult *options.InstallResult
 
+	espSpec := mount.Spec{
+		PartitionLabel: constants.EFIPartitionLabel,
+		FilesystemType: partition.FilesystemTypeVFAT,
+		MountTarget:    filepath.Join(opts.MountPrefix, constants.EFIMountPoint),
+	}
+
+	install := func() error {
+		if err := c.copyAssets(opts, ukiFileName); err != nil {
+			return err
+		}
+
+		var err error
+
+		installResult, err = c.setup(opts, ukiFileName)
+
+		return err
+	}
+
+	// a supplied ESP carries VFAT directly with no partition table, so mount as-is
+	if opts.ESPDevice != "" {
+		if err = mount.DeviceOp(
+			opts.ESPDevice,
+			espSpec,
+			install,
+			[]mountv3.ManagerOption{},
+			nil,
+		); err != nil {
+			return nil, err
+		}
+
+		return installResult, nil
+	}
+
 	err = mount.PartitionOp(
 		opts.BootDisk,
-		[]mount.Spec{
-			{
-				PartitionLabel: constants.EFIPartitionLabel,
-				FilesystemType: partition.FilesystemTypeVFAT,
-				MountTarget:    filepath.Join(opts.MountPrefix, constants.EFIMountPoint),
-			},
-		},
+		[]mount.Spec{espSpec},
 		func() error {
 			if err := c.copyAssets(opts, ukiFileName); err != nil {
 				return err
@@ -406,69 +438,82 @@ func (c *Config) Install(opts options.InstallOptions) (*options.InstallResult, e
 func (c *Config) Upgrade(opts options.InstallOptions) (*options.InstallResult, error) {
 	var installResult *options.InstallResult
 
+	espSpec := mount.Spec{
+		PartitionLabel: constants.EFIPartitionLabel,
+		FilesystemType: partition.FilesystemTypeVFAT,
+		MountTarget:    filepath.Join(opts.MountPrefix, constants.EFIMountPoint),
+	}
+
+	upgradeESP := func() error {
+		// list existing UKIs, and clean up all but the current one (used to boot)
+		files, err := filepath.Glob(filepath.Join(opts.MountPrefix, constants.EFIMountPoint, "EFI", "Linux", "Talos-*.efi"))
+		if err != nil {
+			return err
+		}
+
+		opts.Printf("sd-boot: found existing UKIs during upgrade: %v", xslices.Map(files, filepath.Base))
+
+		ukiPath, err := generateNextUKIName(opts.Version, files)
+		if err != nil {
+			return fmt.Errorf("failed to generate next UKI name: %w", err)
+		}
+
+		// the cleanup below might remove the UKI LoaderEntryDefault points to (when the entry which
+		// boots next is not the one we are running from), so repoint the default to the booted entry
+		// first: if the upgrade is interrupted before setup() rewrites it, the next boot still lands
+		// on a UKI which exists.
+		if !strings.EqualFold(c.NextBootEntry, c.BootedEntry) {
+			opts.Printf("sd-boot: pointing the default entry to the booted one for the duration of the upgrade: %s", c.BootedEntry)
+
+			if err = WriteVariable(LoaderEntryDefaultName, c.BootedEntry); err != nil {
+				return err
+			}
+		}
+
+		for _, file := range files {
+			if strings.EqualFold(filepath.Base(file), c.BootedEntry) {
+				if !strings.EqualFold(c.BootedEntry, ukiPath) {
+					// set fallback to the entry we are running from unless it matches the new install
+					c.Fallback = c.BootedEntry
+				}
+
+				continue
+			}
+
+			opts.Printf("removing old UKI: %s", file)
+
+			if err = os.Remove(file); err != nil {
+				return err
+			}
+		}
+
+		if err := c.copyAssets(opts, ukiPath); err != nil {
+			return err
+		}
+
+		installResult, err = c.setup(opts, ukiPath)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	// a supplied ESP carries VFAT directly with no partition table, so mount as-is
+	if opts.ESPDevice != "" {
+		return installResult, mount.DeviceOp(
+			opts.ESPDevice,
+			espSpec,
+			upgradeESP,
+			[]mountv3.ManagerOption{},
+			nil,
+		)
+	}
+
 	err := mount.PartitionOp(
 		opts.BootDisk,
-		[]mount.Spec{
-			{
-				PartitionLabel: constants.EFIPartitionLabel,
-				FilesystemType: partition.FilesystemTypeVFAT,
-				MountTarget:    filepath.Join(opts.MountPrefix, constants.EFIMountPoint),
-			},
-		},
-		func() error {
-			// list existing UKIs, and clean up all but the current one (used to boot)
-			files, err := filepath.Glob(filepath.Join(opts.MountPrefix, constants.EFIMountPoint, "EFI", "Linux", "Talos-*.efi"))
-			if err != nil {
-				return err
-			}
-
-			opts.Printf("sd-boot: found existing UKIs during upgrade: %v", xslices.Map(files, filepath.Base))
-
-			ukiPath, err := generateNextUKIName(opts.Version, files)
-			if err != nil {
-				return fmt.Errorf("failed to generate next UKI name: %w", err)
-			}
-
-			// the cleanup below might remove the UKI LoaderEntryDefault points to (when the entry which
-			// boots next is not the one we are running from), so repoint the default to the booted entry
-			// first: if the upgrade is interrupted before setup() rewrites it, the next boot still lands
-			// on a UKI which exists.
-			if !strings.EqualFold(c.NextBootEntry, c.BootedEntry) {
-				opts.Printf("sd-boot: pointing the default entry to the booted one for the duration of the upgrade: %s", c.BootedEntry)
-
-				if err = WriteVariable(LoaderEntryDefaultName, c.BootedEntry); err != nil {
-					return err
-				}
-			}
-
-			for _, file := range files {
-				if strings.EqualFold(filepath.Base(file), c.BootedEntry) {
-					if !strings.EqualFold(c.BootedEntry, ukiPath) {
-						// set fallback to the entry we are running from unless it matches the new install
-						c.Fallback = c.BootedEntry
-					}
-
-					continue
-				}
-
-				opts.Printf("removing old UKI: %s", file)
-
-				if err = os.Remove(file); err != nil {
-					return err
-				}
-			}
-
-			if err := c.copyAssets(opts, ukiPath); err != nil {
-				return err
-			}
-
-			installResult, err = c.setup(opts, ukiPath)
-			if err != nil {
-				return err
-			}
-
-			return nil
-		},
+		[]mount.Spec{espSpec},
+		upgradeESP,
 		[]blkid.ProbeOption{
 			// installation happens with locked blockdevice
 			blkid.WithSkipLocking(true),
@@ -507,9 +552,9 @@ func (c *Config) setup(opts options.InstallOptions, ukiFileName string) (*option
 
 	defer efiRW.Close() //nolint:errcheck
 
-	blkidInfo, err := blkid.ProbePath(opts.BootDisk, blkid.WithSkipLocking(true))
+	targets, err := bootTargets(opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to probe block device %s: %w", opts.BootDisk, err)
+		return nil, err
 	}
 
 	sdbootFilename, err := bootloaderutils.Name(opts.Arch)
@@ -517,7 +562,7 @@ func (c *Config) setup(opts options.InstallOptions, ukiFileName string) (*option
 		return nil, fmt.Errorf("failed to get sd-boot file path: %w", err)
 	}
 
-	if err := CreateBootEntry(efiRW, blkidInfo, opts.Printf, sdbootFilename); err != nil {
+	if err := CreateBootEntries(efiRW, targets, len(opts.ESPMembers) > 0, opts.Printf, sdbootFilename); err != nil {
 		return nil, fmt.Errorf("failed to create boot entry: %w", err)
 	}
 
@@ -710,4 +755,34 @@ func findNextBootUKIFile(ukiFiles []string, defaultEntry, selectedEntry string) 
 	}
 
 	return findMatchingUKIFile(ukiFiles, selectedEntry)
+}
+
+// bootTargets resolves the ESPs the boot entries point at; a mirrored ESP yields one target per member, since firmware cannot boot the array itself.
+func bootTargets(opts options.InstallOptions) ([]BootTarget, error) {
+	if len(opts.ESPMembers) == 0 {
+		blkidInfo, err := blkid.ProbePath(opts.BootDisk, blkid.WithSkipLocking(true))
+		if err != nil {
+			return nil, fmt.Errorf("failed to probe block device %s: %w", opts.BootDisk, err)
+		}
+
+		return ESPTargetsFromDisk(blkidInfo)
+	}
+
+	targets := make([]BootTarget, 0, len(opts.ESPMembers))
+
+	for _, member := range opts.ESPMembers {
+		diskInfo, err := blkid.ProbePath(member.Disk, blkid.WithSkipLocking(true))
+		if err != nil {
+			return nil, fmt.Errorf("failed to probe block device %s: %w", member.Disk, err)
+		}
+
+		part, err := FindESPPartition(diskInfo, member.Disk, member.Partition)
+		if err != nil {
+			return nil, err
+		}
+
+		targets = append(targets, BootTarget{Disk: diskInfo, Part: part, Suffix: member.Partition})
+	}
+
+	return targets, nil
 }
