@@ -339,7 +339,10 @@ func TestSetBootEntry(t *testing.T) {
 
 			logger := &mockLogger{}
 
-			require.NoError(t, sdboot.CreateBootEntry(testData.efivarfsMock, blkidInfo, logger.Printf, "test-entry"))
+			targets, err := sdboot.ESPTargetsFromDisk(blkidInfo)
+			require.NoError(t, err)
+
+			require.NoError(t, sdboot.CreateBootEntries(testData.efivarfsMock, targets, logger.Printf, "test-entry"))
 
 			bootEntries, err := efivarfs.ListBootEntries(testData.efivarfsMock)
 			require.NoError(t, err)
