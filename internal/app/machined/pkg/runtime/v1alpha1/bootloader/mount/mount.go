@@ -30,6 +30,36 @@ type Spec struct {
 // NotFoundTag is a tag for a partition not found/mismatch errors.
 type NotFoundTag struct{}
 
+// DeviceOp mounts a whole device, executes the operation func, and unmounts it. PartitionOp resolves by GPT label, which a device with no partition table lacks.
+func DeviceOp(
+	dev string, spec Spec, opFunc func() error,
+	mountOptions []mount.ManagerOption,
+	filesystemOptions []fsopen.Option,
+) error {
+	manager := mount.NewManager(slices.Concat(
+		[]mount.ManagerOption{
+			mount.WithTarget(spec.MountTarget),
+			mount.WithFsopen(
+				spec.FilesystemType,
+				slices.Concat(
+					[]fsopen.Option{fsopen.WithSource(dev)},
+					filesystemOptions,
+				)...,
+			),
+		},
+		mountOptions,
+	)...)
+
+	unmounter, err := mount.Managers{manager}.Mount()
+	if err != nil {
+		return fmt.Errorf("error mounting %s: %w", dev, err)
+	}
+
+	defer unmounter() //nolint:errcheck
+
+	return opFunc()
+}
+
 // PartitionOp mounts specified partitions with the specified label, executes the operation func, and unmounts the partition(s).
 func PartitionOp(
 	disk string, specs []Spec, opFunc func() error,
