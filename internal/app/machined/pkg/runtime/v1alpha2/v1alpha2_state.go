@@ -322,6 +322,7 @@ func NewState() (*State, error) {
 		&storage.LVMVolumeGroupStatus{},
 		&storage.MDArraySpec{},
 		&storage.MDArrayStatus{},
+		&storage.MDLastResortStatus{},
 		&storage.MDRefreshRequest{},
 		&time.AdjtimeStatus{},
 		&time.NTPStatus{},

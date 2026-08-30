@@ -42,6 +42,7 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/resources/block"
 	configresource "github.com/siderolabs/talos/pkg/machinery/resources/config"
 	"github.com/siderolabs/talos/pkg/machinery/resources/runtime"
+	storageres "github.com/siderolabs/talos/pkg/machinery/resources/storage"
 	"github.com/siderolabs/talos/pkg/machinery/resources/v1alpha1"
 	"github.com/siderolabs/talos/pkg/xfs"
 )
@@ -110,6 +111,12 @@ func (ctrl *AcquireController) Inputs() []controller.Input {
 			Namespace: runtime.NamespaceName,
 			Type:      runtime.MaintenanceServiceRequestType,
 			Kind:      controller.InputDestroyReady,
+		},
+		{
+			Namespace: storageres.NamespaceName,
+			Type:      storageres.MDLastResortStatusType,
+			ID:        optional.Some(storageres.MDLastResortStatusID),
+			Kind:      controller.InputWeak,
 		},
 		{
 			Namespace: block.NamespaceName,
@@ -240,6 +247,20 @@ func (ctrl *AcquireController) Run(ctx context.Context, r controller.Runtime, lo
 	}
 }
 
+// mdLastResortSettled reports whether MD last-resort assembly has finished trying. An absent resource is settled: the controller does not run in every mode.
+func (ctrl *AcquireController) mdLastResortSettled(ctx context.Context, r controller.Runtime) (bool, error) {
+	status, err := safe.ReaderGetByID[*storageres.MDLastResortStatus](ctx, r, storageres.MDLastResortStatusID)
+	if err != nil {
+		if state.IsNotFoundError(err) {
+			return true, nil
+		}
+
+		return false, fmt.Errorf("failed observing MD last-resort status: %w", err)
+	}
+
+	return status.TypedSpec().Settled, nil
+}
+
 // stateDisk acquires machine configuration from disk (STATE partition).
 //
 // Transitions:
@@ -261,6 +282,17 @@ func (ctrl *AcquireController) stateDisk(ctx context.Context, r controller.Runti
 		// wait for the status to be available
 		return nil, nil, nil
 	case stateVolumeStatus.TypedSpec().Phase == block.VolumePhaseMissing:
+		// "missing" and "not assembled yet" are different answers: a node booting on one disk of a mirror reads STATE missing for the whole grace period.
+		settled, err := ctrl.mdLastResortSettled(ctx, r)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if !settled {
+			// wait for the definitive status
+			return nil, nil, nil
+		}
+
 		// STATE is missing, proceed to stateEmbedded
 		return ctrl.stateEmbedded, nil, nil
 	case stateVolumeStatus.TypedSpec().Phase == block.VolumePhaseReady:

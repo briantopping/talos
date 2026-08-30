@@ -40,6 +40,12 @@ type UnattendedInstallController struct {
 	// State is the resource state used to match the install disk.
 	State state.State
 
+	postInstallErr error
+
+	// PostInstallFunc runs after the installer has written the disk. Its failure is reported
+	// but does not mark the install failed: the disk is already written.
+	PostInstallFunc func(ctx context.Context) error
+
 	// InstalledFunc reports whether the node is already installed to disk.
 	InstalledFunc func() bool
 
@@ -88,9 +94,13 @@ func NewUnattendedInstallController(rt v1alpha1runtime.Runtime) *UnattendedInsta
 				return err
 			}
 
-			// the install sequence (which reloads/flushes META after the installer) is skipped when the
-			// UnattendedInstallConfig document drives the install, so merge the in-memory META with what
-			// the installer wrote into the partition it just created here
+			return nil
+		},
+		// the install sequence (which reloads/flushes META after the installer) is skipped when the
+		// UnattendedInstallConfig document drives the install, so merge the in-memory META with what
+		// the installer wrote into the partition it just created. Separate from InstallFunc because
+		// the disk is already written: a failure here must not re-run the installer.
+		PostInstallFunc: func(ctx context.Context) error {
 			meta := rt.State().Machine().Meta()
 
 			if err := install.ReloadMeta(ctx, resources, meta); err != nil {
@@ -105,6 +115,10 @@ func NewUnattendedInstallController(rt v1alpha1runtime.Runtime) *UnattendedInsta
 		},
 	}
 }
+
+// maxPostInstallAttempts bounds the merge retry so a permanently failing one does not
+// consume the controller for the life of the boot.
+const maxPostInstallAttempts = 3
 
 // Name implements controller.Controller interface.
 func (ctrl *UnattendedInstallController) Name() string {
@@ -203,7 +217,13 @@ func (ctrl *UnattendedInstallController) reconcile(
 		if !state.IsNotFoundError(err) {
 			return fmt.Errorf("error getting unattended install status: %w", err)
 		}
-	} else if phase := existing.TypedSpec().Phase; phase == runtime.UnattendedInstallPhaseInstalled || phase == runtime.UnattendedInstallPhaseWaitingForReboot {
+	} else if phase := existing.TypedSpec().Phase; phase == runtime.UnattendedInstallPhaseInstalled || phase == runtime.UnattendedInstallPhaseWaitingForReboot || phase == runtime.UnattendedInstallPhaseInstalling {
+		// the merge is retried, the installer is not: the measured failure is a timeout while
+		// the array reassembles, and boot-time repopulation is gated on META being absent, so
+		// a merge that never succeeds drops the in-memory values permanently
+
+		// Installing is included: a controller restart mid-install must not start a second
+		// installer against a disk whose volumes are open.
 		// re-affirm the status (so CleanupOutputs retains it): the install target is fixed and a new
 		// disk later matching the selector must not trigger a reinstall.
 		//
@@ -284,6 +304,18 @@ func (ctrl *UnattendedInstallController) reconcile(
 
 	ctrl.installDone = true
 
+	// retried here, before the reboot is requested: afterwards the machine is going down and
+	// a merge would race the teardown's unmount. ReloadMeta and SyncMeta are retried as a
+	// pair -- SyncMeta alone would flush stale in-memory META over what the installer wrote.
+	for attempt := range maxPostInstallAttempts {
+		if ctrl.postInstallErr = ctrl.PostInstallFunc(ctx); ctrl.postInstallErr == nil {
+			break
+		}
+
+		logger.Error("post-install step failed; the disk is written, so the installer is not re-run",
+			zap.Int("attempt", attempt+1), zap.Error(ctrl.postInstallErr))
+	}
+
 	logger.Info("install successful")
 
 	if ctrl.shouldReboot(doc) {
@@ -298,7 +330,7 @@ func (ctrl *UnattendedInstallController) reconcile(
 		logger.Info("not rebooting after successful install (reboot disabled)")
 	}
 
-	return ctrl.setStatus(ctx, r, doc, ctrl.installedPhase(doc), nil)
+	return ctrl.setStatus(ctx, r, doc, ctrl.installedPhase(doc), ctrl.postInstallErr)
 }
 
 // installedPhase returns the phase to report once the install is complete for this boot.
@@ -340,6 +372,11 @@ func (ctrl *UnattendedInstallController) setStatus(
 	phase runtime.UnattendedInstallPhase,
 	statusErr error,
 ) error {
+	if statusErr == nil {
+		// a caller with nothing to report must not erase a post-install failure
+		statusErr = ctrl.postInstallErr
+	}
+
 	return safe.WriterModify(ctx, r, runtime.NewUnattendedInstallStatus(), func(status *runtime.UnattendedInstallStatus) error {
 		status.TypedSpec().Image = doc.InstallerImage()
 		status.TypedSpec().Phase = phase

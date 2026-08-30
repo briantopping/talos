@@ -18,10 +18,14 @@ import (
 
 	machineruntime "github.com/siderolabs/talos/internal/app/machined/pkg/runtime"
 	"github.com/siderolabs/talos/pkg/machinery/resources/block"
+	"github.com/siderolabs/talos/pkg/machinery/resources/storage"
 	"github.com/siderolabs/talos/pkg/machinery/resources/v1alpha1"
 )
 
 const mdLastResortGracePeriod = 30 * time.Second
+
+// mdPostAssemblySettle keeps the status unsettled after force-running arrays, so udev and the volume manager have a chance to notice them.
+const mdPostAssemblySettle = 5 * time.Second
 
 // MDLastResortBackend lists and force-runs inactive MD arrays.
 type MDLastResortBackend interface {
@@ -60,7 +64,25 @@ func (ctrl *MDLastResortController) Inputs() []controller.Input {
 
 // Outputs implements controller.Controller.
 func (ctrl *MDLastResortController) Outputs() []controller.Output {
-	return nil
+	return []controller.Output{
+		{
+			Type: storage.MDLastResortStatusType,
+			Kind: controller.OutputExclusive,
+		},
+	}
+}
+
+// reportSettled publishes whether any further arrays are still expected, so a reader can tell "nothing there" from "not assembled yet".
+func (ctrl *MDLastResortController) reportSettled(ctx context.Context, r controller.Runtime, settled bool, pending []string) error {
+	return safe.WriterModify(ctx, r,
+		storage.NewMDLastResortStatus(storage.NamespaceName, storage.MDLastResortStatusID),
+		func(s *storage.MDLastResortStatus) error {
+			s.TypedSpec().Settled = settled
+			s.TypedSpec().Pending = pending
+
+			return nil
+		},
+	)
 }
 
 func (ctrl *MDLastResortController) udevdReady(ctx context.Context, r controller.Reader, logger *zap.Logger) (bool, error) {
@@ -79,6 +101,8 @@ func (ctrl *MDLastResortController) udevdReady(ctx context.Context, r controller
 }
 
 // Run implements controller.Controller.
+//
+//nolint:gocyclo
 func (ctrl *MDLastResortController) Run(ctx context.Context, r controller.Runtime, logger *zap.Logger) error {
 	if ctrl.V1Alpha1Mode.IsAgent() {
 		return nil
@@ -86,10 +110,18 @@ func (ctrl *MDLastResortController) Run(ctx context.Context, r controller.Runtim
 
 	grace := ctrl.gracePeriod()
 
-	var graceCh <-chan time.Time
+	var (
+		graceCh  <-chan time.Time
+		settleCh <-chan time.Time
+	)
+
+	// start unsettled, before udevd is up: an absent resource reads as "nothing to wait for"
+	if err := ctrl.reportSettled(ctx, r, false, nil); err != nil {
+		return err
+	}
 
 	for {
-		var fired bool
+		var fired, settled bool
 
 		select {
 		case <-ctx.Done():
@@ -98,6 +130,9 @@ func (ctrl *MDLastResortController) Run(ctx context.Context, r controller.Runtim
 		case <-graceCh:
 			graceCh = nil
 			fired = true
+		case <-settleCh:
+			settleCh = nil
+			settled = true
 		}
 
 		if fired {
@@ -105,12 +140,26 @@ func (ctrl *MDLastResortController) Run(ctx context.Context, r controller.Runtim
 				logger.Warn("failed to force-run degraded MD arrays", zap.Error(err))
 			}
 
+			// still unsettled: the arrays exist, but nothing has looked at them yet
+			settleCh = time.After(mdPostAssemblySettle)
+
+			continue
+		}
+
+		if settled {
+			settleCh = nil
+
+			// grace elapsed, arrays force-run, block layer has seen them
+			if err := ctrl.reportSettled(ctx, r, true, nil); err != nil {
+				return err
+			}
+
 			continue
 		}
 
 		var err error
 
-		graceCh, err = ctrl.handleEvent(ctx, r, logger, grace, graceCh)
+		graceCh, err = ctrl.handleEvent(ctx, r, logger, grace, graceCh, settleCh != nil)
 		if err != nil {
 			return err
 		}
@@ -131,6 +180,8 @@ func (ctrl *MDLastResortController) handleEvent(
 	logger *zap.Logger,
 	grace time.Duration,
 	graceCh <-chan time.Time,
+	// holdUnsettled: set while a post-assembly settle is pending, or the next event would settle early since the arrays are active by then.
+	holdUnsettled bool,
 ) (<-chan time.Time, error) {
 	ready, err := ctrl.udevdReady(ctx, r, logger)
 	if err != nil {
@@ -141,28 +192,43 @@ func (ctrl *MDLastResortController) handleEvent(
 		return graceCh, nil
 	}
 
-	return ctrl.armGraceIfInactive(logger, grace, graceCh), nil
+	next, pending := ctrl.armGraceIfInactive(logger, grace, graceCh)
+
+	// nothing inactive and nothing armed: settled. The ordinary path with no MD.
+	if next == nil {
+		if !holdUnsettled {
+			if err := ctrl.reportSettled(ctx, r, true, nil); err != nil {
+				return graceCh, err
+			}
+		}
+	} else if len(pending) > 0 {
+		if err := ctrl.reportSettled(ctx, r, false, pending); err != nil {
+			return graceCh, err
+		}
+	}
+
+	return next, nil
 }
 
-func (ctrl *MDLastResortController) armGraceIfInactive(logger *zap.Logger, grace time.Duration, graceCh <-chan time.Time) <-chan time.Time {
+func (ctrl *MDLastResortController) armGraceIfInactive(logger *zap.Logger, grace time.Duration, graceCh <-chan time.Time) (<-chan time.Time, []string) {
 	if graceCh != nil {
-		return graceCh
+		return graceCh, nil
 	}
 
 	inactive, err := ctrl.MD.InactiveArrays()
 	if err != nil {
 		logger.Warn("failed to list MD arrays", zap.Error(err))
 
-		return nil
+		return nil, nil
 	}
 
 	if len(inactive) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	logger.Info("inactive MD arrays detected; will force-run degraded after grace if still stopped", zap.Strings("arrays", inactive), zap.Duration("grace", grace))
 
-	return time.After(grace)
+	return time.After(grace), inactive
 }
 
 func (ctrl *MDLastResortController) forceRunInactive(ctx context.Context, logger *zap.Logger) error {
