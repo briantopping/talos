@@ -50,7 +50,11 @@ import (
 type Options struct {
 	ConfigSource string
 	// Can be an actual disk path or a file representing a disk image.
-	DiskPath            string
+	DiskPath string
+	// ESPDevice, when set, is an already-formatted VFAT device to install the bootloader into rather than creating an ESP on DiskPath.
+	ESPDevice string
+	// ESPMembers are the physical partitions backing ESPDevice.
+	ESPMembers          []bootloaderoptions.ESPMember
 	Platform            string
 	Arch                string
 	ExtraKernelArgs     []string
@@ -344,6 +348,25 @@ func (i *Installer) Install(ctx context.Context, mode Mode) (err error) {
 		i.errataNetIfnames(hostTalosVersion)
 	}
 
+	// discovered, not configured: /dev/mdN is not stable, and the members already identify the array by carrying the ESP type
+	if mode == ModeInstall && i.options.ESPDevice == "" {
+		esp, espMembers, espErr := DiscoverMirroredESP()
+		if espErr != nil {
+			return espErr
+		}
+
+		if esp != "" {
+			i.options.Printf("using mirrored ESP %s", esp)
+
+			if espErr = EnsureESPFilesystem(ctx, esp, i.options.Version, i.options.Printf); espErr != nil {
+				return espErr
+			}
+
+			i.options.ESPDevice = esp
+			i.options.ESPMembers = espMembers
+		}
+	}
+
 	if err = i.runPreflightChecks(mode); err != nil {
 		return err
 	}
@@ -543,6 +566,8 @@ func (i *Installer) handleMeta(ctx context.Context, mode Mode, previousLabel str
 func (i *Installer) generateBootloaderOptions(ctx context.Context, mode Mode, info *blkid.Info) bootloaderoptions.InstallOptions {
 	return bootloaderoptions.InstallOptions{
 		BootDisk:          i.options.DiskPath,
+		ESPDevice:         i.options.ESPDevice,
+		ESPMembers:        i.options.ESPMembers,
 		Arch:              i.options.Arch,
 		Cmdline:           i.cmdline.String(),
 		GrubUseUKICmdline: i.options.GrubUseUKICmdline,

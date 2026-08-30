@@ -316,6 +316,11 @@ func (c *Config) PrepareBootPartitions(opts options.InstallOptions) ([]partition
 		formatOptions = append(formatOptions, partition.WithSourceDirectory(filepath.Join(opts.MountPrefix, "EFI")))
 	}
 
+	if opts.ESPDevice != "" {
+		// the ESP already exists as its own device; a second one would be ambiguous
+		return nil, nil
+	}
+
 	partitionOptions := []partition.Options{
 		partition.NewPartitionOptions(
 			true,
@@ -364,15 +369,42 @@ func (c *Config) Install(opts options.InstallOptions) (*options.InstallResult, e
 
 	var installResult *options.InstallResult
 
+	espSpec := mount.Spec{
+		PartitionLabel: constants.EFIPartitionLabel,
+		FilesystemType: partition.FilesystemTypeVFAT,
+		MountTarget:    filepath.Join(opts.MountPrefix, constants.EFIMountPoint),
+	}
+
+	install := func() error {
+		if err := c.copyAssets(opts, ukiFileName); err != nil {
+			return err
+		}
+
+		var err error
+
+		installResult, err = c.setup(opts, ukiFileName)
+
+		return err
+	}
+
+	// a supplied ESP carries VFAT directly with no partition table, so mount as-is
+	if opts.ESPDevice != "" {
+		if err = mount.DeviceOp(
+			opts.ESPDevice,
+			espSpec,
+			install,
+			[]mountv3.ManagerOption{},
+			nil,
+		); err != nil {
+			return nil, err
+		}
+
+		return installResult, nil
+	}
+
 	err = mount.PartitionOp(
 		opts.BootDisk,
-		[]mount.Spec{
-			{
-				PartitionLabel: constants.EFIPartitionLabel,
-				FilesystemType: partition.FilesystemTypeVFAT,
-				MountTarget:    filepath.Join(opts.MountPrefix, constants.EFIMountPoint),
-			},
-		},
+		[]mount.Spec{espSpec},
 		func() error {
 			if err := c.copyAssets(opts, ukiFileName); err != nil {
 				return err
@@ -507,9 +539,9 @@ func (c *Config) setup(opts options.InstallOptions, ukiFileName string) (*option
 
 	defer efiRW.Close() //nolint:errcheck
 
-	blkidInfo, err := blkid.ProbePath(opts.BootDisk, blkid.WithSkipLocking(true))
+	targets, err := bootTargets(opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to probe block device %s: %w", opts.BootDisk, err)
+		return nil, err
 	}
 
 	sdbootFilename, err := bootloaderutils.Name(opts.Arch)
@@ -517,7 +549,7 @@ func (c *Config) setup(opts options.InstallOptions, ukiFileName string) (*option
 		return nil, fmt.Errorf("failed to get sd-boot file path: %w", err)
 	}
 
-	if err := CreateBootEntry(efiRW, blkidInfo, opts.Printf, sdbootFilename); err != nil {
+	if err := CreateBootEntries(efiRW, targets, opts.Printf, sdbootFilename); err != nil {
 		return nil, fmt.Errorf("failed to create boot entry: %w", err)
 	}
 
@@ -710,4 +742,34 @@ func findNextBootUKIFile(ukiFiles []string, defaultEntry, selectedEntry string) 
 	}
 
 	return findMatchingUKIFile(ukiFiles, selectedEntry)
+}
+
+// bootTargets resolves the ESPs the boot entries point at; a mirrored ESP yields one target per member, since firmware cannot boot the array itself.
+func bootTargets(opts options.InstallOptions) ([]BootTarget, error) {
+	if len(opts.ESPMembers) == 0 {
+		blkidInfo, err := blkid.ProbePath(opts.BootDisk, blkid.WithSkipLocking(true))
+		if err != nil {
+			return nil, fmt.Errorf("failed to probe block device %s: %w", opts.BootDisk, err)
+		}
+
+		return ESPTargetsFromDisk(blkidInfo)
+	}
+
+	targets := make([]BootTarget, 0, len(opts.ESPMembers))
+
+	for _, member := range opts.ESPMembers {
+		diskInfo, err := blkid.ProbePath(member.Disk, blkid.WithSkipLocking(true))
+		if err != nil {
+			return nil, fmt.Errorf("failed to probe block device %s: %w", member.Disk, err)
+		}
+
+		part, err := FindESPPartition(diskInfo, member.Disk, member.Partition)
+		if err != nil {
+			return nil, err
+		}
+
+		targets = append(targets, BootTarget{Disk: diskInfo, Part: part, Suffix: member.Partition})
+	}
+
+	return targets, nil
 }
