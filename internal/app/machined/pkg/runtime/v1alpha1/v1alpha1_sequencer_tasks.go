@@ -71,6 +71,7 @@ import (
 	resourcefiles "github.com/siderolabs/talos/pkg/machinery/resources/files"
 	"github.com/siderolabs/talos/pkg/machinery/resources/k8s"
 	resourceruntime "github.com/siderolabs/talos/pkg/machinery/resources/runtime"
+	storageres "github.com/siderolabs/talos/pkg/machinery/resources/storage"
 	resourcev1alpha1 "github.com/siderolabs/talos/pkg/machinery/resources/v1alpha1"
 	"github.com/siderolabs/talos/pkg/minimal"
 )
@@ -1499,6 +1500,85 @@ func UnmountPromotableSystemPartitions(runtime.Sequence, any) (runtime.TaskExecu
 	}, "unmountPromotableSystemPartitions"
 }
 
+const (
+	mdArrayWaitTimeout     = 60 * time.Second
+	devicePathPollInterval = 100 * time.Millisecond
+)
+
+// waitForDeclaredMDArrays waits for the md arrays declared in the machine config to be assembled, so the installer does not resolve its target before they exist.
+func waitForDeclaredMDArrays(ctx context.Context, logger *log.Logger, r runtime.Runtime) error {
+	names := xslices.Map(r.Config().RAIDArrayConfigs(), func(c configconfig.RAIDArrayConfig) string { return c.Name() })
+
+	if len(names) == 0 {
+		return nil
+	}
+
+	logger.Printf("waiting for the declared RAID arrays: %v", names)
+
+	ctx, cancel := context.WithTimeout(ctx, mdArrayWaitTimeout)
+	defer cancel()
+
+	st := r.State().V1Alpha2().Resources()
+
+	for _, name := range names {
+		arrayStatus, err := st.WatchFor(
+			ctx,
+			storageres.NewMDArrayStatus(storageres.NamespaceName, name).Metadata(),
+			state.WithCondition(func(res resource.Resource) (bool, error) {
+				status, ok := res.(*storageres.MDArrayStatus)
+				if !ok {
+					return false, nil
+				}
+
+				switch status.TypedSpec().Status {
+				// a rebuilding mirror is usable; refusing it would block the install
+				case storageres.MDArrayPhaseReady, storageres.MDArrayPhaseRebuilding:
+					return true, nil
+				case storageres.MDArrayPhaseError:
+					return false, fmt.Errorf("RAID array %q failed to assemble: %s", name, status.TypedSpec().Error)
+				case storageres.MDArrayPhaseUnknown, storageres.MDArrayPhaseWaiting:
+					return false, nil
+				default:
+					return false, nil
+				}
+			}),
+		)
+		if err != nil {
+			return fmt.Errorf("error waiting for RAID array %q: %w", name, err)
+		}
+
+		device := arrayStatus.(*storageres.MDArrayStatus).TypedSpec().Device
+
+		if err = waitForDevicePath(ctx, device); err != nil {
+			return fmt.Errorf("RAID array %q assembled but never appeared at %s: %w", name, device, err)
+		}
+
+		logger.Printf("RAID array %q assembled: %s", name, device)
+	}
+
+	return nil
+}
+
+// waitForDevicePath waits for a device path to exist: MDArrayStatus.Device is constructed rather than observed, so udev may not have created it yet.
+func waitForDevicePath(ctx context.Context, path string) error {
+	ticker := time.NewTicker(devicePathPollInterval)
+	defer ticker.Stop()
+
+	for {
+		if _, err := os.Lstat(path); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 // Install mounts or installs the system partitions.
 //
 //nolint:gocyclo,cyclop
@@ -1515,6 +1595,10 @@ func Install(runtime.Sequence, any) (runtime.TaskExecutionFunc, string) {
 
 			if err = crires.WaitForImageCache(ctx, r.State().V1Alpha2().Resources()); err != nil {
 				return fmt.Errorf("failed to wait for the image cache: %w", err)
+			}
+
+			if err = waitForDeclaredMDArrays(ctx, logger, r); err != nil {
+				return err
 			}
 
 			var disk string
@@ -1749,12 +1833,97 @@ func ForceCleanup(runtime.Sequence, any) (runtime.TaskExecutionFunc, string) {
 	}, "forceCleanup"
 }
 
+// waitForMDLastResortSettled waits for last-resort assembly of degraded MD arrays to finish trying. An absent status is treated as settled, as nothing will answer.
+func waitForMDLastResortSettled(ctx context.Context, logger *log.Logger, r runtime.Runtime) error {
+	st := r.State().V1Alpha2().Resources()
+
+	status, err := safe.StateGetByID[*storageres.MDLastResortStatus](ctx, st, storageres.MDLastResortStatusID)
+	if err != nil {
+		if state.IsNotFoundError(err) {
+			return nil
+		}
+
+		return fmt.Errorf("error getting MD last-resort status: %w", err)
+	}
+
+	if status.TypedSpec().Settled {
+		return nil
+	}
+
+	logger.Printf("waiting for degraded RAID array assembly to settle")
+
+	ctx, cancel := context.WithTimeout(ctx, mdArrayWaitTimeout)
+	defer cancel()
+
+	if _, err = st.WatchFor(
+		ctx,
+		storageres.NewMDLastResortStatus(storageres.NamespaceName, storageres.MDLastResortStatusID).Metadata(),
+		state.WithCondition(func(res resource.Resource) (bool, error) {
+			settled, ok := res.(*storageres.MDLastResortStatus)
+
+			return ok && settled.TypedSpec().Settled, nil
+		}),
+	); err != nil {
+		return fmt.Errorf("error waiting for MD last-resort to settle: %w", err)
+	}
+
+	return nil
+}
+
+const metaWaitTimeout = 90 * time.Second
+
+func pendingRAIDMembers(ctx context.Context, r runtime.Runtime) bool {
+	volumes, err := safe.StateListAll[*blockres.DiscoveredVolume](ctx, r.State().V1Alpha2().Resources())
+	if err != nil {
+		return false
+	}
+
+	for volume := range volumes.All() {
+		if volume.TypedSpec().Name == "linux_raid_member" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func waitForMeta(ctx context.Context, r runtime.Runtime) error {
+	ctx, cancel := context.WithTimeout(ctx, metaWaitTimeout)
+	defer cancel()
+
+	if _, err := blockres.WaitForVolumePhase(ctx, r.State().V1Alpha2().Resources(), constants.MetaPartitionLabel, blockres.VolumePhaseReady); err != nil {
+		return err
+	}
+
+	return r.State().Machine().Meta().Reload(ctx)
+}
+
 // ReloadMeta reloads META partition after disk mount, installer run, etc.
 //
 //nolint:gocyclo
 func ReloadMeta(runtime.Sequence, any) (runtime.TaskExecutionFunc, string) {
 	return func(ctx context.Context, logger *log.Logger, r runtime.Runtime) error {
+		// META may live on an md array not yet assembled; reloading before it exists reads nothing, reports no error, and never runs again.
+		if err := waitForMDLastResortSettled(ctx, logger, r); err != nil {
+			// log and continue: the META wait below is the actual recovery, and failing the
+			// phase here reboots the machine on exactly the degraded case this exists for
+			logger.Printf("waiting for degraded RAID assembly to settle failed: %s", err)
+		}
+
 		err := r.State().Machine().Meta().Reload(ctx)
+
+		if errors.Is(err, fs.ErrNotExist) && pendingRAIDMembers(ctx, r) {
+			logger.Printf("META not found and unassembled RAID members are present; waiting for the array")
+
+			if waitErr := waitForMeta(ctx, r); waitErr != nil {
+				logger.Printf("META did not appear within %s: %s", metaWaitTimeout, waitErr)
+			} else {
+				logger.Printf("META loaded after waiting for the array")
+
+				err = nil
+			}
+		}
+
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
