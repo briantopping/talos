@@ -63,6 +63,8 @@ type VolumeConfigSpec struct {
 
 // Wave constants.
 const (
+	// WaveBootDisk is provisioned before the system disk exists, for volumes the installer itself needs. Later waves are unreachable until an install has run.
+	WaveBootDisk        = -2
 	WaveSystemDisk      = -1
 	WaveUserVolumes     = 0
 	WaveLegacyUserDisks = 1000000 // legacy user disks rely on specific order of provisioning

@@ -376,7 +376,10 @@ func (ctrl *VolumeManagerController) Run(ctx context.Context, r controller.Runti
 
 			// if the volume is not ready yet, we can consider the wave not fully provisioned, so the next wave can't start provisioning either
 			// but if the volume doesn't have provisioning instructions, we don't block on it being ready
-			if volumeStatus.TypedSpec().Phase != block.VolumePhaseReady && !value.IsZero(vc.TypedSpec().Provisioning) {
+			// WaveBootDisk is exempt: a member on a missing disk is never provisioned, and would stall every later wave.
+			if volumeStatus.TypedSpec().Phase != block.VolumePhaseReady &&
+				!value.IsZero(vc.TypedSpec().Provisioning) &&
+				vc.TypedSpec().Provisioning.Wave != block.WaveBootDisk {
 				fullyProvisionedWave = vc.TypedSpec().Provisioning.Wave - 1
 			}
 
