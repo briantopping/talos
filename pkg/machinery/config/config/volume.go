@@ -165,6 +165,10 @@ type RawVolumeConfig interface {
 	RawVolumeConfigSignal()
 	Provisioning() VolumeProvisioningConfig
 	Encryption() EncryptionConfig
+	// PartitionType is the GPT partition type GUID to stamp on the partition. Empty means Linux filesystem data.
+	PartitionType() string
+	// ProvisionBeforeInstall reports whether the volume is boot infrastructure which must exist before the installer runs, rather than an ordinary user volume.
+	ProvisionBeforeInstall() bool
 }
 
 // ExistingVolumeConfig defines the interface to access existing volume configuration.
