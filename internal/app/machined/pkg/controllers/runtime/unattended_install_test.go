@@ -6,6 +6,7 @@ package runtime_test
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -90,9 +91,10 @@ func (suite *UnattendedInstallSuite) register(installed *atomic.Bool, installCal
 // registerCapturing is like register but records the image passed to the install seam.
 func (suite *UnattendedInstallSuite) registerCapturing(installed *atomic.Bool, installCalls *atomic.Int64, installImage *atomic.Pointer[string]) {
 	suite.Require().NoError(suite.Runtime().RegisterController(&runtimectrls.UnattendedInstallController{
-		State:         suite.State(),
-		InstalledFunc: installed.Load,
-		PlatformFunc:  func() string { return testPlatform },
+		State:           suite.State(),
+		InstalledFunc:   installed.Load,
+		PlatformFunc:    func() string { return testPlatform },
+		PostInstallFunc: func(context.Context) error { return nil },
 		InstallFunc: func(_ context.Context, _, image string, _ bool) error {
 			installCalls.Add(1)
 
@@ -104,6 +106,49 @@ func (suite *UnattendedInstallSuite) registerCapturing(installed *atomic.Bool, i
 			return nil
 		},
 	}))
+}
+
+// TestPostInstallRetried drives a post-install merge that fails twice and then succeeds.
+// The point of the fix is that the merge is retried and the INSTALLER is not: a second
+// installer against a disk whose volumes are open repartitions the array under a mounted
+// STATE, which is how this was found.
+func (suite *UnattendedInstallSuite) TestPostInstallRetried() {
+	var (
+		installed    atomic.Bool
+		installCalls atomic.Int64
+		postCalls    atomic.Int64
+	)
+
+	suite.Require().NoError(suite.Runtime().RegisterController(&runtimectrls.UnattendedInstallController{
+		State:         suite.State(),
+		InstalledFunc: installed.Load,
+		PlatformFunc:  func() string { return testPlatform },
+		PostInstallFunc: func(context.Context) error {
+			postCalls.Add(1)
+
+			return errors.New("meta merge timed out")
+		},
+		InstallFunc: func(_ context.Context, _, _ string, _ bool) error {
+			installCalls.Add(1)
+
+			return nil
+		},
+	}))
+
+	suite.createConfig()
+	suite.createDisk("sda")
+
+	// the merge failure must surface rather than be erased, and must never mark the
+	// install failed: the disk is written.
+	rtestutils.AssertResource[*runtime.UnattendedInstallStatus](suite.Ctx(), suite.T(), suite.State(), runtime.UnattendedInstallStatusID,
+		func(status *runtime.UnattendedInstallStatus, asrt *assert.Assertions) {
+			asrt.NotEqual(runtime.UnattendedInstallPhaseFailed, status.TypedSpec().Phase)
+			asrt.NotEmpty(status.TypedSpec().Error)
+		})
+
+	suite.Assert().EqualValues(1, installCalls.Load(), "the installer must run exactly once")
+	suite.Assert().Greater(postCalls.Load(), int64(1), "the merge must be retried")
+	suite.Assert().LessOrEqual(postCalls.Load(), int64(3), "the retry must be bounded")
 }
 
 func (suite *UnattendedInstallSuite) TestNoConfig() {
