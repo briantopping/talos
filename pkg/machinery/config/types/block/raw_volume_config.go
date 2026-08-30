@@ -72,6 +72,19 @@ type RawVolumeConfigV1Alpha1 struct {
 	//   description: |
 	//     The encryption describes how the volume is encrypted.
 	EncryptionSpec EncryptionSpec `yaml:"encryption,omitempty"`
+	//   description: |
+	//     The GPT partition type GUID to stamp on the partition. Defaults to Linux
+	//     filesystem data.
+	//   examples:
+	//     - value: >
+	//         "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+	PartitionTypeSpec string `yaml:"partitionType,omitempty"`
+	//   examples:
+	//     - value: >
+	//         true
+	//   schema:
+	//     type: boolean
+	ProvisionBeforeInstallSpec bool `yaml:"provisionBeforeInstall,omitempty"`
 }
 
 // NewRawVolumeConfigV1Alpha1 creates a new raw volume config document.
@@ -160,6 +173,16 @@ func (s *RawVolumeConfigV1Alpha1) Validate(validation.RuntimeMode, ...validation
 
 // RawVolumeConfigSignal is a signal for user volume config.
 func (s *RawVolumeConfigV1Alpha1) RawVolumeConfigSignal() {}
+
+// PartitionType implements config.RawVolumeConfig interface.
+func (s *RawVolumeConfigV1Alpha1) PartitionType() string {
+	return s.PartitionTypeSpec
+}
+
+// ProvisionBeforeInstall implements config.RawVolumeConfig interface.
+func (s *RawVolumeConfigV1Alpha1) ProvisionBeforeInstall() bool {
+	return s.ProvisionBeforeInstallSpec
+}
 
 // Provisioning implements config.RawVolumeConfig interface.
 func (s *RawVolumeConfigV1Alpha1) Provisioning() config.VolumeProvisioningConfig {
