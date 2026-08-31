@@ -105,6 +105,11 @@ func (assets *BootAssets) FillDefaults(arch string) {
 type ProbeOptions struct {
 	BlockProbeOptions []blkid.ProbeOption
 	Logger            func(format string, v ...any)
+
+	// WholeDeviceESP says the probed device carries the ESP filesystem directly, with no
+	// partition table -- which is what a mirrored ESP on an md array looks like. Probing
+	// must then mount the device itself rather than hunt for a partition inside it.
+	WholeDeviceESP bool
 }
 
 // Logf logs the message using the provided logger.

@@ -102,109 +102,123 @@ func ProbeWithCallback(disk string, options options.ProbeOptions, callback func(
 
 	// read /boot/EFI and find if sd-boot is already being used
 	// this is to make sure sd-boot from Talos is being used and not sd-boot from another distro
-	if err := mount.PartitionOp(
-		disk,
-		[]mount.Spec{
-			{
-				PartitionLabel: constants.EFIPartitionLabel,
-				FilesystemType: partition.FilesystemTypeVFAT,
-				MountTarget:    constants.EFIMountPoint,
-			},
+	probeSpecs := []mount.Spec{
+		{
+			PartitionLabel: constants.EFIPartitionLabel,
+			FilesystemType: partition.FilesystemTypeVFAT,
+			MountTarget:    constants.EFIMountPoint,
 		},
-		func() error {
-			// list existing boot*.efi files in boot folder
-			files, err := filepath.Glob(filepath.Join(constants.EFIMountPoint, "EFI", "boot", "BOOT*.efi"))
-			if err != nil {
-				return err
-			}
+	}
 
-			if len(files) == 0 {
-				return fmt.Errorf("no boot*.efi files found in %s", filepath.Join(constants.EFIMountPoint, "EFI", "boot"))
-			}
+	// A mirrored ESP is the md array itself: VFAT with no partition table, so there is no
+	// partition to find inside it and PartitionOp reports the ESP as missing on a machine
+	// whose ESP is present and healthy. Install and Upgrade already special-case this;
+	// probing has to agree with them or an upgrade can never detect its own bootloader.
+	probeFunc := func() error {
+		// list existing boot*.efi files in boot folder
+		files, err := filepath.Glob(filepath.Join(constants.EFIMountPoint, "EFI", "boot", "BOOT*.efi"))
+		if err != nil {
+			return err
+		}
 
-			// list existing UKIs, and check if the current one is present
-			ukiFiles, err := filepath.Glob(filepath.Join(constants.EFIMountPoint, "EFI", "Linux", "Talos-*.efi"))
-			if err != nil {
-				return err
-			}
+		if len(files) == 0 {
+			return fmt.Errorf("no boot*.efi files found in %s", filepath.Join(constants.EFIMountPoint, "EFI", "boot"))
+		}
 
-			if len(ukiFiles) == 0 {
-				return fmt.Errorf("no UKI files found in %q", filepath.Join(constants.EFIMountPoint, "EFI", "Linux"))
-			}
+		// list existing UKIs, and check if the current one is present
+		ukiFiles, err := filepath.Glob(filepath.Join(constants.EFIMountPoint, "EFI", "Linux", "Talos-*.efi"))
+		if err != nil {
+			return err
+		}
 
-			options.Logf("sd-boot: found UKI files: %v", xslices.Map(ukiFiles, filepath.Base))
+		if len(ukiFiles) == 0 {
+			return fmt.Errorf("no UKI files found in %q", filepath.Join(constants.EFIMountPoint, "EFI", "Linux"))
+		}
 
-			// LoaderEntryDefault is the persistent sd-boot default. It is not necessarily the
-			// entry running now, because an operator can select a different entry at boot.
-			loaderEntryDefault, err := ReadVariable(LoaderEntryDefaultName)
-			if err != nil {
-				return err
-			}
+		options.Logf("sd-boot: found UKI files: %v", xslices.Map(ukiFiles, filepath.Base))
 
-			options.Logf("sd-boot: LoaderEntryDefault: %s", loaderEntryDefault)
+		// LoaderEntryDefault is the persistent sd-boot default. It is not necessarily the
+		// entry running now, because an operator can select a different entry at boot.
+		loaderEntryDefault, err := ReadVariable(LoaderEntryDefaultName)
+		if err != nil {
+			return err
+		}
 
-			// LoaderEntrySelected is the entry selected by sd-boot for this boot. It can be
-			// stale after kexec, where sd-boot did not participate in the current boot.
-			loaderEntrySelected, err := ReadVariable(LoaderEntrySelectedName)
-			if err != nil {
-				return err
-			}
+		options.Logf("sd-boot: LoaderEntryDefault: %s", loaderEntryDefault)
 
-			options.Logf("sd-boot: LoaderEntrySelected: %s", loaderEntrySelected)
+		// LoaderEntrySelected is the entry selected by sd-boot for this boot. It can be
+		// stale after kexec, where sd-boot did not participate in the current boot.
+		loaderEntrySelected, err := ReadVariable(LoaderEntrySelectedName)
+		if err != nil {
+			return err
+		}
 
-			loaderEntryOneShot, err := ReadVariable(LoaderEntryOneShotName)
-			if err != nil {
-				return err
-			}
+		options.Logf("sd-boot: LoaderEntrySelected: %s", loaderEntrySelected)
 
-			options.Logf("sd-boot: LoaderEntryOneShot: %s", loaderEntryOneShot)
+		loaderEntryOneShot, err := ReadVariable(LoaderEntryOneShotName)
+		if err != nil {
+			return err
+		}
 
-			loaderEntryRebootReason, err := ReadVariable(LoaderEntryRebootReasonName)
-			if err != nil {
-				return err
-			}
+		options.Logf("sd-boot: LoaderEntryOneShot: %s", loaderEntryOneShot)
 
-			options.Logf("sd-boot: LoaderEntryRebootReason: %s", loaderEntryRebootReason)
+		loaderEntryRebootReason, err := ReadVariable(LoaderEntryRebootReasonName)
+		if err != nil {
+			return err
+		}
 
-			if loaderEntrySelected == "" && loaderEntryDefault == "" {
-				return errors.New("sd-boot: no LoaderEntryDefault or LoaderEntrySelected found, cannot continue")
-			}
+		options.Logf("sd-boot: LoaderEntryRebootReason: %s", loaderEntryRebootReason)
 
-			bootedEntry, bootedEntryOk := findBootedUKIFile(
-				ukiFiles,
-				loaderEntryDefault,
-				loaderEntrySelected,
-				loaderEntryOneShot,
-				loaderEntryRebootReason,
-			)
+		if loaderEntrySelected == "" && loaderEntryDefault == "" {
+			return errors.New("sd-boot: no LoaderEntryDefault or LoaderEntrySelected found, cannot continue")
+		}
 
-			nextBootEntry, nextBootEntryOk := findNextBootUKIFile(ukiFiles, loaderEntryDefault, loaderEntrySelected)
+		bootedEntry, bootedEntryOk := findBootedUKIFile(
+			ukiFiles,
+			loaderEntryDefault,
+			loaderEntrySelected,
+			loaderEntryOneShot,
+			loaderEntryRebootReason,
+		)
 
-			if !bootedEntryOk || !nextBootEntryOk {
-				return errors.New("sd-boot: no valid boot entry found matching LoaderEntrySelected or LoaderEntryDefault")
-			}
+		nextBootEntry, nextBootEntryOk := findNextBootUKIFile(ukiFiles, loaderEntryDefault, loaderEntrySelected)
 
-			sdbootConf = &Config{
-				BootedEntry:   bootedEntry,
-				NextBootEntry: nextBootEntry,
-			}
+		if !bootedEntryOk || !nextBootEntryOk {
+			return errors.New("sd-boot: no valid boot entry found matching LoaderEntrySelected or LoaderEntryDefault")
+		}
 
-			options.Logf("sd-boot: booted entry: %s, next boot entry: %s", sdbootConf.BootedEntry, sdbootConf.NextBootEntry)
+		sdbootConf = &Config{
+			BootedEntry:   bootedEntry,
+			NextBootEntry: nextBootEntry,
+		}
 
-			if callback != nil {
-				return callback(sdbootConf)
-			}
+		options.Logf("sd-boot: booted entry: %s, next boot entry: %s", sdbootConf.BootedEntry, sdbootConf.NextBootEntry)
 
-			return nil
-		},
-		options.BlockProbeOptions,
-		[]mountv3.ManagerOption{
-			mountv3.WithSkipIfMounted(),
-			mountv3.WithReadOnly(),
-		},
-		nil,
-		nil,
-	); err != nil {
+		if callback != nil {
+			return callback(sdbootConf)
+		}
+
+		return nil
+	}
+
+	mountOpts := []mountv3.ManagerOption{
+		mountv3.WithSkipIfMounted(),
+		mountv3.WithReadOnly(),
+	}
+
+	var err error
+
+	if options.WholeDeviceESP {
+		// No partition table to search: mount the device itself, as Install and Upgrade do.
+		espSpec := probeSpecs[0]
+		espSpec.PartitionLabel = ""
+
+		err = mount.DeviceOp(disk, espSpec, probeFunc, mountOpts, nil)
+	} else {
+		err = mount.PartitionOp(disk, probeSpecs, probeFunc, options.BlockProbeOptions, mountOpts, nil, nil)
+	}
+
+	if err != nil {
 		if xerrors.TagIs[mount.NotFoundTag](err) {
 			return nil, nil
 		}
