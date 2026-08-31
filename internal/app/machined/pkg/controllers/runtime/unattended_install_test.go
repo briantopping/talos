@@ -377,18 +377,15 @@ func (suite *UnattendedInstallSuite) TestInstallImageNoBootEntry() {
 	suite.Assert().EqualValues(0, installCalls.Load())
 }
 
-// TestImageCacheWaitFailureIsNotAMetaError pins the reason the image-cache wait was moved
-// OUT of the retried unit.
+// TestImageCacheWaitFailureIsNotAMetaError pins the reason the image-cache wait is called
+// outside the retry loop.
 //
-// It is the last step, so when it fails the META pair has already succeeded. While it lived
-// inside the retry, a failure here re-ran two operations that had worked -- and attempt 2's
-// ReloadMeta could then fail for the measured reason (META churn while the array settles
-// after the repartition), overwriting the reported error with a META timeout on a machine
-// whose META merged fine. That error is what a venue reads out of status.Error, so the
-// defect was a false alarm in the one field added to make the install observable.
+// It is the last step, so when it fails the META pair has already succeeded. Retrying it
+// re-runs two operations that worked, and a second ReloadMeta can fail while the array is
+// still settling after the repartition -- surfacing a META timeout on a machine whose META
+// merged correctly.
 //
-// The assertions are therefore: the META pair runs ONCE, and a cache-copy failure does not
-// become a META error.
+// So: the META pair runs once, and a cache-copy failure does not become a META error.
 func (suite *UnattendedInstallSuite) TestImageCacheWaitFailureIsNotAMetaError() {
 	var (
 		installed    atomic.Bool
