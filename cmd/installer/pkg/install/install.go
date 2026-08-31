@@ -361,7 +361,16 @@ func (i *Installer) Install(ctx context.Context, mode Mode) (err error) {
 	// discovered, not configured: /dev/mdN is not stable, and the members already identify the array by carrying the ESP type.
 	// runs on upgrade too: the mirrored ESP is a property of the machine, not of the install.
 	if (mode == ModeInstall || mode == ModeUpgrade) && i.options.ESPDevice == "" {
-		esp, espMembers, espErr := DiscoverMirroredESP()
+		// On upgrade the disk is already locked by the installer, and blkid cannot take a
+		// second lock -- the probe then fails, memberIsESP folds that error into "not an
+		// ESP", and the array is silently skipped. Install works because nothing holds the
+		// lock yet, which is why this only ever failed on the upgrade path.
+		var discoverOpts []blkid.ProbeOption
+		if mode == ModeUpgrade {
+			discoverOpts = append(discoverOpts, blkid.WithSkipLocking(true))
+		}
+
+		esp, espMembers, espErr := DiscoverMirroredESP(discoverOpts...)
 		if espErr != nil {
 			return espErr
 		}
