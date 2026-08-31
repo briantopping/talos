@@ -248,6 +248,7 @@ func (i *Installer) detectBootloader(mode Mode) (bootloaderpkg.Bootloader, error
 		}
 
 		return bootloaderpkg.Probe(probeTarget, bootloaderoptions.ProbeOptions{
+			WholeDeviceESP: i.options.ESPDevice != "",
 			// the disk is already locked
 			BlockProbeOptions: []blkid.ProbeOption{
 				blkid.WithSkipLocking(true),
