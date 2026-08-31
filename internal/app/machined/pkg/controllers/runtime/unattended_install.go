@@ -123,24 +123,17 @@ func NewUnattendedInstallController(rt v1alpha1runtime.Runtime) *UnattendedInsta
 // maxPostInstallAttempts bounds the merge retry so a permanently failing one does not
 // consume the controller for the life of the boot.
 //
-// This bounds ATTEMPTS, not TIME, and the distinction is load-bearing. Each attempt is
-// ReloadMeta + SyncMeta, which carry their own 60s timeouts (internal/pkg/install/meta.go),
-// so the retried unit is ~6 minutes worst case. That is only true because the image-cache
-// wait was moved OUT of it: crires.WaitForImageCacheCopy is a bare WatchFor with no
-// timeout, and while it sat in here this comment claimed a bound the code did not have.
-//
-// The status reads `installing` throughout, because it is set before InstallFunc and not
-// written again until after this loop. Both bootstrap gates refuse on `installing`, so
-// that is correct -- but on a machine with no console it looks like a hang, and someone
-// will power-cycle it. The number is stated here so it is not a surprise.
+// This bounds attempts, not time. Each attempt is ReloadMeta + SyncMeta, which carry
+// their own 60s timeouts (internal/pkg/install/meta.go), so a permanently failing merge
+// occupies about six minutes. UnattendedInstallStatus reads `installing` throughout,
+// which correctly keeps the bootstrap gates closed, but on a machine with no console it
+// is indistinguishable from a hang.
 const maxPostInstallAttempts = 3
 
 // postInstallRetryDelay spaces the attempts.
 //
-// Without it the bound only works for SLOW failures, where each attempt supplies its own
-// spacing by burning a 60s timeout. A fast failure -- an error out of
-// WaitForImageCacheCopy, or a ReloadMeta error that is not the wait -- would make all
-// three attempts complete in microseconds: a bound with no retry inside it.
+// Without it a fast failure -- a ReloadMeta error that is not the timeout -- would retry
+// three times in microseconds, which is not a retry.
 //
 // A variable, not a const, so tests can drive the loop without paying for the sleep.
 var postInstallRetryDelay = 2 * time.Second
@@ -351,26 +344,22 @@ func (ctrl *UnattendedInstallController) reconcile(
 
 	// ONCE, and deliberately not retried.
 	//
-	// It is the LAST step, so by the time it can fail the META pair has already SUCCEEDED.
-	// Retrying it would re-run two operations that worked, and attempt 2's ReloadMeta can
-	// then fail for the measured reason -- META churn while the array settles after the
-	// repartition -- overwriting postInstallErr with a META timeout on a machine whose META
-	// merged fine. That error is what the venue reads out of status.Error, and an operator
-	// who sees "meta merge timed out" on a machine with correct META learns to distrust the
-	// field. The cost of a false alarm is that it teaches you to ignore a true one.
+	// It is the last step, so by the time it can fail the META pair has already succeeded.
+	// Retrying it re-runs two operations that worked, and a second ReloadMeta can fail while
+	// the array is still settling after the repartition -- reporting a META timeout on a
+	// machine whose META merged correctly. Its outcome is observable on ImageCacheConfig's
+	// CopyStatus, so it is logged here rather than merged into UnattendedInstallStatus.
 	//
-	// It is also UNBOUNDED: a bare WatchFor with no timeout, unlike the META pair. If the
-	// cache is enabled and the copy stalls, this blocks and the RebootRequest below is never
-	// written -- a machine that installs and never reboots. Not new (it was equally unbounded
-	// as the last statement of the old InstallFunc) and not fixed here, because a timeout is
-	// a policy decision about how long a legitimate cache copy may take. Stated rather than
-	// hidden inside something advertised as bounded. With the cache disabled, copyStatus is
-	// Skipped and this returns immediately, which is the common case.
-	// No nil guard, deliberately: a dropped wire must panic in tests rather than silently
-	// skip the wait, which would be an absence recorded as a success.
+	// Note this call is unbounded, unlike the META pair: if the cache is enabled and the copy
+	// stalls, the reboot below is never requested. That is pre-existing behaviour (it was the
+	// final statement of the install path before this split) and is left alone, since a
+	// suitable timeout for a legitimate cache copy is a policy decision. With the cache
+	// disabled CopyStatus is Skipped and this returns immediately.
+	// No nil guard, deliberately: an unset hook must fail loudly in tests rather than
+	// silently skip the wait.
 	if err = ctrl.ImageCacheWaitFunc(ctx); err != nil {
-		// Reported, never merged into postInstallErr: this is a different fact from
-		// "the META merge failed" and must not be readable as one.
+		// Logged, not merged into postInstallErr: a stalled cache copy must not be
+		// reportable as a META merge failure.
 		logger.Error("image cache copy wait failed; the install itself is complete",
 			zap.Error(err))
 	}
