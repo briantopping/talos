@@ -108,10 +108,14 @@ func (suite *UnattendedInstallSuite) registerCapturing(installed *atomic.Bool, i
 	}))
 }
 
-// TestPostInstallRetried drives a post-install merge that fails twice and then succeeds.
+// TestPostInstallRetried drives a post-install merge that NEVER succeeds.
 // The point of the fix is that the merge is retried and the INSTALLER is not: a second
 // installer against a disk whose volumes are open repartitions the array under a mounted
 // STATE, which is how this was found.
+//
+// Permanent failure is deliberately the case under test. An earlier version failed twice
+// and then succeeded, and asserted a non-empty Error afterwards -- which a recovered merge
+// legitimately does not have. The wrong half was the assertion, not the code.
 func (suite *UnattendedInstallSuite) TestPostInstallRetried() {
 	var (
 		installed    atomic.Bool
