@@ -237,7 +237,17 @@ func (i *Installer) detectBootloader(mode Mode) (bootloaderpkg.Bootloader, error
 	case ModeInstall:
 		return bootloaderpkg.NewAuto(), nil
 	case ModeUpgrade:
-		return bootloaderpkg.Probe(i.options.DiskPath, bootloaderoptions.ProbeOptions{
+		// Probe the ESP, not the system disk, when they are different devices. A mirrored
+		// ESP lives on its own array: Install() discovers it and sets ESPDevice, but the
+		// system disk it would otherwise probe carries no ESP at all, so the probe fails
+		// with "file does not exist" and the upgrade aborts on a machine whose bootloader
+		// is present and healthy.
+		probeTarget := i.options.DiskPath
+		if i.options.ESPDevice != "" {
+			probeTarget = i.options.ESPDevice
+		}
+
+		return bootloaderpkg.Probe(probeTarget, bootloaderoptions.ProbeOptions{
 			// the disk is already locked
 			BlockProbeOptions: []blkid.ProbeOption{
 				blkid.WithSkipLocking(true),
