@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cosi-project/runtime/pkg/controller"
 	"github.com/cosi-project/runtime/pkg/safe"
@@ -118,7 +119,23 @@ func NewUnattendedInstallController(rt v1alpha1runtime.Runtime) *UnattendedInsta
 
 // maxPostInstallAttempts bounds the merge retry so a permanently failing one does not
 // consume the controller for the life of the boot.
+//
+// Worst case is roughly six minutes: 3 x (ReloadMeta 60s + SyncMeta 60s). The status
+// reads `installing` throughout, because it is set before InstallFunc and not written
+// again until after this loop. Both bootstrap gates refuse on `installing`, so that is
+// correct -- but on a machine with no console it looks like a hang, and someone will
+// power-cycle it. The number is stated here so it is not a surprise.
 const maxPostInstallAttempts = 3
+
+// postInstallRetryDelay spaces the attempts.
+//
+// Without it the bound only works for SLOW failures, where each attempt supplies its own
+// spacing by burning a 60s timeout. A fast failure -- an error out of
+// WaitForImageCacheCopy, or a ReloadMeta error that is not the wait -- would make all
+// three attempts complete in microseconds: a bound with no retry inside it.
+//
+// A variable, not a const, so tests can drive the loop without paying for the sleep.
+var postInstallRetryDelay = 2 * time.Second
 
 // Name implements controller.Controller interface.
 func (ctrl *UnattendedInstallController) Name() string {
@@ -314,6 +331,14 @@ func (ctrl *UnattendedInstallController) reconcile(
 
 		logger.Error("post-install step failed; the disk is written, so the installer is not re-run",
 			zap.Int("attempt", attempt+1), zap.Error(ctrl.postInstallErr))
+
+		if attempt+1 < maxPostInstallAttempts {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(postInstallRetryDelay):
+			}
+		}
 	}
 
 	logger.Info("install successful")
