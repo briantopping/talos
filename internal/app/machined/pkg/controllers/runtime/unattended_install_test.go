@@ -91,10 +91,11 @@ func (suite *UnattendedInstallSuite) register(installed *atomic.Bool, installCal
 // registerCapturing is like register but records the image passed to the install seam.
 func (suite *UnattendedInstallSuite) registerCapturing(installed *atomic.Bool, installCalls *atomic.Int64, installImage *atomic.Pointer[string]) {
 	suite.Require().NoError(suite.Runtime().RegisterController(&runtimectrls.UnattendedInstallController{
-		State:           suite.State(),
-		InstalledFunc:   installed.Load,
-		PlatformFunc:    func() string { return testPlatform },
-		PostInstallFunc: func(context.Context) error { return nil },
+		State:              suite.State(),
+		InstalledFunc:      installed.Load,
+		PlatformFunc:       func() string { return testPlatform },
+		PostInstallFunc:    func(context.Context) error { return nil },
+		ImageCacheWaitFunc: func(context.Context) error { return nil },
 		InstallFunc: func(_ context.Context, _, image string, _ bool) error {
 			installCalls.Add(1)
 
@@ -132,6 +133,7 @@ func (suite *UnattendedInstallSuite) TestPostInstallRetried() {
 
 			return errors.New("meta merge timed out")
 		},
+		ImageCacheWaitFunc: func(context.Context) error { return nil },
 		InstallFunc: func(_ context.Context, _, _ string, _ bool) error {
 			installCalls.Add(1)
 
@@ -373,4 +375,66 @@ func (suite *UnattendedInstallSuite) TestInstallImageNoBootEntry() {
 		})
 
 	suite.Assert().EqualValues(0, installCalls.Load())
+}
+
+// TestImageCacheWaitFailureIsNotAMetaError pins the reason the image-cache wait was moved
+// OUT of the retried unit.
+//
+// It is the last step, so when it fails the META pair has already succeeded. While it lived
+// inside the retry, a failure here re-ran two operations that had worked -- and attempt 2's
+// ReloadMeta could then fail for the measured reason (META churn while the array settles
+// after the repartition), overwriting the reported error with a META timeout on a machine
+// whose META merged fine. That error is what a venue reads out of status.Error, so the
+// defect was a false alarm in the one field added to make the install observable.
+//
+// The assertions are therefore: the META pair runs ONCE, and a cache-copy failure does not
+// become a META error.
+func (suite *UnattendedInstallSuite) TestImageCacheWaitFailureIsNotAMetaError() {
+	var (
+		installed    atomic.Bool
+		installCalls atomic.Int64
+		postCalls    atomic.Int64
+		cacheCalls   atomic.Int64
+	)
+
+	suite.Require().NoError(suite.Runtime().RegisterController(&runtimectrls.UnattendedInstallController{
+		State:         suite.State(),
+		InstalledFunc: installed.Load,
+		PlatformFunc:  func() string { return testPlatform },
+		PostInstallFunc: func(context.Context) error {
+			postCalls.Add(1)
+
+			return nil
+		},
+		ImageCacheWaitFunc: func(context.Context) error {
+			cacheCalls.Add(1)
+
+			return errors.New("image cache copy never completed")
+		},
+		InstallFunc: func(_ context.Context, _, _ string, _ bool) error {
+			installCalls.Add(1)
+			installed.Store(true)
+
+			return nil
+		},
+	}))
+
+	suite.createConfig()
+	suite.createDisk("sda")
+
+	rtestutils.AssertResource[*runtime.UnattendedInstallStatus](suite.Ctx(), suite.T(), suite.State(),
+		runtime.UnattendedInstallStatusID,
+		func(s *runtime.UnattendedInstallStatus, asrt *assert.Assertions) {
+			asrt.NotEqual(runtime.UnattendedInstallPhaseFailed, s.TypedSpec().Phase)
+			// The cache-copy failure must NOT surface as a post-install error. An operator
+			// who reads "meta merge timed out" on a machine whose META is correct stops
+			// believing the field.
+			asrt.Empty(s.TypedSpec().Error)
+		})
+
+	suite.Assert().EqualValues(1, installCalls.Load(), "the installer must run exactly once")
+	suite.Assert().EqualValues(1, postCalls.Load(),
+		"the META pair must not be re-run because the cache wait failed")
+	suite.Assert().EqualValues(1, cacheCalls.Load(),
+		"the cache wait must be called once and never retried")
 }
