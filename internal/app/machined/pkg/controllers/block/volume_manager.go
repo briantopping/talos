@@ -41,6 +41,8 @@ type VolumeManagerController struct {
 	// BootPartitionWaitTimeout bounds the wait for the boot partition to be discovered before the volumes
 	// might be declared missing, defaults to bootpartition.DefaultWaitTimeout.
 	BootPartitionWaitTimeout time.Duration
+	// LVM deactivates volume groups on an encrypted volume before it is closed; nil skips that step.
+	LVM volumes.LVM
 }
 
 // Name implements controller.Controller interface.
@@ -400,6 +402,7 @@ func (ctrl *VolumeManagerController) Run(ctx context.Context, r controller.Runti
 						SaltGetter:           ctrl.getSaltGetter(r),
 					},
 					ShouldCloseVolume: shouldCloseVolume,
+					LVM:               ctrl.LVM,
 				},
 			); err != nil {
 				volumeStatus.TypedSpec().PreFailPhase = volumeStatus.TypedSpec().Phase

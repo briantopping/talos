@@ -28,6 +28,17 @@ func (lvm *LVM) VGChangeActivate(ctx context.Context, vgName string) error {
 	return nil
 }
 
+// VGChangeDeactivate deactivates the given volume group via `lvm vgchange -an <vg>`.
+//
+// It fails while any of the group's logical volumes is open, which callers treat as "not yet".
+func (lvm *LVM) VGChangeDeactivate(ctx context.Context, vgName string) error {
+	if _, err := lvm.run(ctx, "vgchange", "-an", vgName); err != nil {
+		return fmt.Errorf("deactivate volume group %q: %w", vgName, err)
+	}
+
+	return nil
+}
+
 // PVScanAutoActivation runs `lvm pvscan --cache --listvg --checkcomplete
 // --vgonline --autoactivation event --udevoutput <devicePath>` and returns the
 // parsed udev-style key/value pairs.

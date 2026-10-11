@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/siderolabs/gen/xerrors"
 	blockdev "github.com/siderolabs/go-blockdevice/v2/block"
@@ -54,6 +55,10 @@ func CloseWithHandler(ctx context.Context, logger *zap.Logger, volumeContext Man
 	defer cancel()
 
 	mappedName := handler.Name() + "-" + volumeContext.Cfg.Metadata().ID()
+
+	if err := ReleaseVolumeGroups(ctx, logger, volumeContext.LVM, filepath.Join("/dev/mapper", mappedName)); err != nil {
+		return xerrors.NewTaggedf[Retryable]("error releasing encrypted volume mapped to %q: %w", mappedName, err)
+	}
 
 	// partition maps stacked on the decrypted device hold it open, so they have to go first: the
 	// kernel drops the partitions of a regular disk together with the disk, but the partitions of a

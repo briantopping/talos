@@ -105,6 +105,7 @@ type ManagerContext struct {
 	PreviousWaveProvisioned bool
 	EncryptionHelpers       encryption.Helpers
 	ShouldCloseVolume       bool
+	LVM                     LVM
 }
 
 // FindDisk returns the disk with the given device path, or nil if it is not known.
