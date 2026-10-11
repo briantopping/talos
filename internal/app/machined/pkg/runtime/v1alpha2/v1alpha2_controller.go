@@ -174,7 +174,9 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
 			MetaProvider: ctrl.v1alpha1Runtime.State().Machine(),
 		},
-		&block.VolumeManagerController{},
+		&block.VolumeManagerController{
+			LVM: lvmProvisioner,
+		},
 		&block.VolumeTrimController{},
 		&block.VolumeTrimScheduleController{},
 		&block.ZswapConfigController{},

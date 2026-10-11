@@ -35,7 +35,10 @@ import (
 )
 
 // VolumeManagerController manages volumes in the system, converting VolumeConfig resources to VolumeStatuses.
-type VolumeManagerController struct{}
+type VolumeManagerController struct {
+	// LVM deactivates volume groups on an encrypted volume before it is closed; nil skips that step.
+	LVM volumes.LVM
+}
 
 // Name implements controller.Controller interface.
 func (ctrl *VolumeManagerController) Name() string {
@@ -360,6 +363,7 @@ func (ctrl *VolumeManagerController) Run(ctx context.Context, r controller.Runti
 						SaltGetter:           ctrl.getSaltGetter(r),
 					},
 					ShouldCloseVolume: shouldCloseVolume,
+					LVM:               ctrl.LVM,
 				},
 			); err != nil {
 				volumeStatus.TypedSpec().PreFailPhase = volumeStatus.TypedSpec().Phase

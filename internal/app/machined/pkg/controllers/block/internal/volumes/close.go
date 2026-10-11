@@ -7,6 +7,7 @@ package volumes
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	"github.com/siderolabs/gen/xerrors"
 	"go.uber.org/zap"
@@ -52,6 +53,10 @@ func CloseWithHandler(ctx context.Context, logger *zap.Logger, volumeContext Man
 	defer cancel()
 
 	mappedName := handler.Name() + "-" + volumeContext.Cfg.Metadata().ID()
+
+	if err := ReleaseVolumeGroups(ctx, logger, volumeContext.LVM, filepath.Join("/dev/mapper", mappedName)); err != nil {
+		return xerrors.NewTaggedf[Retryable]("error releasing encrypted volume mapped to %q: %w", mappedName, err)
+	}
 
 	if err := handler.Close(ctx, mappedName); err != nil {
 		return xerrors.NewTaggedf[Retryable]("error closing encrypted volume mapped to %q: %w", mappedName, err)
