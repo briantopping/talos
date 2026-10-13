@@ -15,6 +15,9 @@ replace (
 	// see https://github.com/mdlayher/kobject/pull/5
 	github.com/mdlayher/kobject => github.com/smira/kobject v0.0.0-20240304111826-49c8d4613389
 
+	// fork: a BFD client re-dials while down, so it does not keep a source address chosen before the link's own
+	github.com/osrg/gobgp/v4 => github.com/briantopping/gobgp/v4 v4.9.1-0.bfdsrc.1
+
 	// replace to disable assembly implementation (see https://github.com/beevik/nts/issues/1#issuecomment-4879122150)
 	github.com/secure-io/siv-go => github.com/smira/siv-go v0.0.0-20260706144621-2093d2730928
 
